@@ -1,0 +1,2 @@
+add_executable(bsky_cpp_version_example version_example.cpp)
+target_link_libraries(bsky_cpp_version_example PRIVATE bsky_cpp::bsky_cpp)

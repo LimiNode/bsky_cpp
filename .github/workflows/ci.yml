@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBSKY_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+      - name: Test
+        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure
+      - name: Documentation links
+        run: python tools/check_markdown_links.py
+      - name: Install
+        run: cmake --install build --config ${{ matrix.build_type }} --prefix "${{ runner.temp }}/bsky_cpp-install"
+      - name: Consumer configure
+        run: cmake -S tests/consumer -B consumer-build -DCMAKE_PREFIX_PATH="${{ runner.temp }}/bsky_cpp-install" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Consumer build
+        run: cmake --build consumer-build --config ${{ matrix.build_type }} --parallel
+      - name: Consumer test
+        run: ctest --test-dir consumer-build --build-config ${{ matrix.build_type }} --output-on-failure
+
+  sanitizers:
+    name: Ubuntu / sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON -DBSKY_ENABLE_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build-sanitized --parallel
+      - name: Test
+        run: ctest --test-dir build-sanitized --output-on-failure

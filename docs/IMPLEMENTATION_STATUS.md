@@ -7,10 +7,14 @@ roadmap item is not evidence of an implementation.
 
 - Repository metadata: `README.md`, `LICENSE`, and `.gitignore`.
 - D0 architecture and engineering documentation in this branch.
+- M0a scaffold: C++17 CMake target, public include layout, version contract,
+  smoke test, CTest integration, install/export package configuration,
+  Markdown link checker, and Windows/Linux/macOS CI definitions.
 
 ## Partial
 
-- None. No executable SDK surface exists to classify as partially complete.
+- M0 is partial: M0a is implemented; `Result`, typed `Error`, and cancellation
+  primitives remain M0b work.
 
 ## Contract-only
 
@@ -21,7 +25,7 @@ roadmap item is not evidence of an implementation.
 
 ## Planned
 
-- M0 through M5 work described in [`ROADMAP.md`](ROADMAP.md).
+- M0b through M5 work described in [`ROADMAP.md`](ROADMAP.md).
 
 ## Deferred
 
