@@ -38,9 +38,15 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bsky_cpp PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-if(BSKY_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(bsky_cpp PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(bsky_cpp PRIVATE -fsanitize=address,undefined)
+function(bsky_cpp_enable_sanitizers target)
+    if(BSKY_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+endfunction()
+
+if(BSKY_ENABLE_SANITIZERS)
+    bsky_cpp_enable_sanitizers(bsky_cpp)
 endif()
 
 if(BSKY_BUILD_TESTS)
