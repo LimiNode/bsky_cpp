@@ -12,6 +12,8 @@ namespace bsky_cpp {
 
 /// Holds either a successful value or one typed Error.
 ///
+/// The state is immutable after construction; assignment is intentionally
+/// deleted so the public API cannot expose `std::variant::valueless_by_exception`.
 /// \thread_safety Not thread-safe; synchronize access to a shared instance.
 template <typename T>
 class Result {
@@ -23,6 +25,11 @@ public:
 
     /// Constructs a failed result.
     explicit Result(Error error) : m_state(std::move(error)) {}
+
+    Result(const Result&) = default;
+    Result(Result&&) = default;
+    Result& operator=(const Result&) = delete;
+    Result& operator=(Result&&) = delete;
 
     /// Returns true when the result contains a value.
     bool has_value() const noexcept {
@@ -99,6 +106,11 @@ public:
 
     /// Constructs a failed void result.
     explicit Result(Error error) : m_error(std::move(error)) {}
+
+    Result(const Result&) = default;
+    Result(Result&&) noexcept = default;
+    Result& operator=(const Result&) = default;
+    Result& operator=(Result&&) noexcept = default;
 
     /// Returns true when the result is successful.
     bool has_value() const noexcept {

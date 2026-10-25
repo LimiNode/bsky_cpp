@@ -71,8 +71,10 @@ const std::string& Error::operation() const noexcept {
 }
 
 void Error::add_metadata(std::string key, std::string value) {
-    if (is_sensitive_key(key)) {
+    if (!is_safe_key(key) || is_sensitive_key(key)) {
         value = "<redacted>";
+    } else if (value.size() > 256U) {
+        value.resize(256U);
     }
     m_metadata.push_back(Metadata{std::move(key), std::move(value)});
 }
@@ -83,11 +85,29 @@ const std::vector<Error::Metadata>& Error::metadata() const noexcept {
 
 bool Error::is_sensitive_key(std::string_view key) noexcept {
     return contains_case_insensitive(key, "authorization") ||
+           contains_case_insensitive(key, "access_key") ||
+           contains_case_insensitive(key, "api_key") ||
+           contains_case_insensitive(key, "bearer") ||
            contains_case_insensitive(key, "cookie") ||
+           contains_case_insensitive(key, "jwt") ||
            contains_case_insensitive(key, "password") ||
            contains_case_insensitive(key, "secret") ||
            contains_case_insensitive(key, "token") ||
            contains_case_insensitive(key, "credential");
+}
+
+bool Error::is_safe_key(std::string_view key) noexcept {
+    return contains_case_insensitive(key, "status") ||
+           contains_case_insensitive(key, "error_code") ||
+           contains_case_insensitive(key, "error_name") ||
+           contains_case_insensitive(key, "retry_after_ms") ||
+           contains_case_insensitive(key, "attempt") ||
+           contains_case_insensitive(key, "operation_id") ||
+           contains_case_insensitive(key, "collection") ||
+           contains_case_insensitive(key, "rkey") ||
+           contains_case_insensitive(key, "cid") ||
+           contains_case_insensitive(key, "uri") ||
+           contains_case_insensitive(key, "endpoint_host");
 }
 
 }  // namespace bsky_cpp

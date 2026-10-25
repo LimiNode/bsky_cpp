@@ -2,11 +2,14 @@
 #include "bsky_cpp/error.hpp"
 #include "bsky_cpp/result.hpp"
 
+#include "test_support.hpp"
+
 #include <atomic>
-#include <cassert>
 #include <memory>
-#include <string>
+#include <stdexcept>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -21,43 +24,180 @@ struct MoveOnly {
     std::unique_ptr<int> value;
 };
 
-void result_success_and_error() {
+struct ThrowingMove {
+    explicit ThrowingMove(int input) : value(input) {}
+    ThrowingMove(const ThrowingMove&) = default;
+    ThrowingMove& operator=(const ThrowingMove&) = default;
+    ThrowingMove(ThrowingMove&& other) {
+        if (throw_on_move) {
+            throw std::runtime_error("intentional test move failure");
+        }
+        value = other.value;
+    }
+    ThrowingMove& operator=(ThrowingMove&& other) {
+        if (throw_on_move) {
+            throw std::runtime_error("intentional test move failure");
+        }
+        value = other.value;
+        return *this;
+    }
+
+    static bool throw_on_move;
+    int value;
+};
+
+bool ThrowingMove::throw_on_move = false;
+
+bool result_success_and_error() {
     bsky_cpp::Result<MoveOnly> success(MoveOnly(7));
-    assert(success.has_value());
-    assert(*success.value().value == 7);
+    if (!BSKY_TEST_CHECK(success.has_value())) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(*success.value().value == 7)) {
+        return false;
+    }
+
+    bsky_cpp::Result<MoveOnly> moved(std::move(success));
+    if (!BSKY_TEST_CHECK(moved.has_value())) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(*moved.value().value == 7)) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(success.has_value())) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(success.value().value == nullptr)) {
+        return false;
+    }
 
     bsky_cpp::Error error(
         bsky_cpp::ErrorCategory::Transport, "request failed", "read_profile");
     error.add_metadata("status", "503");
     error.add_metadata("Authorization", "Bearer secret");
+    error.add_metadata("api_key", "secret");
+    error.add_metadata("payload", "untrusted server body");
     bsky_cpp::Result<MoveOnly> failure(std::move(error));
-    assert(!failure.has_value());
-    assert(failure.error().category() == bsky_cpp::ErrorCategory::Transport);
-    assert(failure.error().metadata().size() == 2);
-    assert(failure.error().metadata()[1].value == "<redacted>");
+    if (!BSKY_TEST_CHECK(!failure.has_value())) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().category() == bsky_cpp::ErrorCategory::Transport)) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata().size() == 4)) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[0].value == "503")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[1].value == "<redacted>")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[2].value == "<redacted>")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[3].value == "<redacted>")) {
+        return false;
+    }
 
     bsky_cpp::Result<void> void_success = bsky_cpp::Result<void>::success();
-    assert(void_success.has_value());
+    if (!BSKY_TEST_CHECK(void_success.has_value())) {
+        return false;
+    }
     bsky_cpp::Result<void> void_failure = bsky_cpp::Result<void>::failure(
         bsky_cpp::Error(bsky_cpp::ErrorCategory::Cancelled, "cancelled"));
-    assert(!void_failure.has_value());
-    assert(void_failure.error().category() == bsky_cpp::ErrorCategory::Cancelled);
+    if (!BSKY_TEST_CHECK(!void_failure.has_value())) {
+        return false;
+    }
+    return BSKY_TEST_CHECK(void_failure.error().category() ==
+                           bsky_cpp::ErrorCategory::Cancelled);
 }
 
-void cancellation_owner_and_repeat() {
+bool result_invalid_access() {
+    bsky_cpp::Result<int> success(1);
+    bool threw = false;
+    try {
+        (void)success.error();
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    if (!BSKY_TEST_CHECK(threw)) {
+        return false;
+    }
+
+    bsky_cpp::Result<int> failure(
+        bsky_cpp::Error(bsky_cpp::ErrorCategory::Internal, "failure"));
+    threw = false;
+    try {
+        (void)failure.value();
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    if (!BSKY_TEST_CHECK(threw)) {
+        return false;
+    }
+
+    return BSKY_TEST_CHECK(!std::is_move_assignable<bsky_cpp::Result<int>>::value);
+}
+
+bool result_exception_safety() {
+    bsky_cpp::Result<ThrowingMove> source(ThrowingMove(9));
+    ThrowingMove::throw_on_move = true;
+    bool threw = false;
+    try {
+        bsky_cpp::Result<ThrowingMove> moved(std::move(source));
+        (void)moved;
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ThrowingMove::throw_on_move = false;
+    if (!BSKY_TEST_CHECK(threw)) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(source.has_value())) {
+        return false;
+    }
+    return BSKY_TEST_CHECK(source.value().value == 9);
+}
+
+bool cancellation_owner_and_repeat() {
     bsky_cpp::CancellationToken token;
     {
         bsky_cpp::CancellationSource source;
         token = source.token();
-        assert(!token.is_cancellation_requested());
-        assert(source.request_cancellation());
-        assert(!source.request_cancellation());
-        assert(source.is_cancellation_requested());
+        if (!BSKY_TEST_CHECK(!token.is_cancellation_requested())) {
+            return false;
+        }
     }
-    assert(token.is_cancellation_requested());
+    if (!BSKY_TEST_CHECK(!token.is_cancellation_requested())) {
+        return false;
+    }
+
+    bsky_cpp::CancellationSource source;
+    token = source.token();
+    if (!BSKY_TEST_CHECK(source.request_cancellation())) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(!source.request_cancellation())) {
+        return false;
+    }
+    return BSKY_TEST_CHECK(token.is_cancellation_requested());
 }
 
-void cancellation_concurrent_requesters() {
+bool cancellation_moved_from_source() {
+    bsky_cpp::CancellationSource source;
+    const bsky_cpp::CancellationToken token = source.token();
+    bsky_cpp::CancellationSource moved(std::move(source));
+    if (!BSKY_TEST_CHECK(!source.request_cancellation())) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(moved.request_cancellation())) {
+        return false;
+    }
+    return BSKY_TEST_CHECK(token.is_cancellation_requested());
+}
+
+bool cancellation_concurrent_requesters() {
     bsky_cpp::CancellationSource source;
     constexpr int requester_count = 8;
     std::atomic<int> first_requests{0};
@@ -73,30 +213,40 @@ void cancellation_concurrent_requesters() {
     for (std::thread& requester : requesters) {
         requester.join();
     }
-    assert(first_requests.load(std::memory_order_relaxed) == 1);
-    assert(source.is_cancellation_requested());
+    if (!BSKY_TEST_CHECK(first_requests.load(std::memory_order_relaxed) == 1)) {
+        return false;
+    }
+    return BSKY_TEST_CHECK(source.is_cancellation_requested());
 }
 
-void cancellation_observation_race() {
+bool cancellation_observation_race() {
     bsky_cpp::CancellationSource source;
     const bsky_cpp::CancellationToken token = source.token();
     std::atomic<bool> observed{false};
     std::thread observer([&token, &observed]() {
-        while (!token.is_cancellation_requested()) {
+        for (int attempt = 0; attempt < 1000000; ++attempt) {
+            if (token.is_cancellation_requested()) {
+                observed.store(true, std::memory_order_release);
+                return;
+            }
+            if ((attempt % 256) == 0) {
+                std::this_thread::yield();
+            }
         }
-        observed.store(true, std::memory_order_release);
     });
     source.request_cancellation();
     observer.join();
-    assert(observed.load(std::memory_order_acquire));
+    return BSKY_TEST_CHECK(observed.load(std::memory_order_acquire));
 }
 
 }  // namespace
 
 int main() {
-    result_success_and_error();
-    cancellation_owner_and_repeat();
-    cancellation_concurrent_requesters();
-    cancellation_observation_race();
+    if (!result_success_and_error() || !result_invalid_access() ||
+        !result_exception_safety() || !cancellation_owner_and_repeat() ||
+        !cancellation_moved_from_source() || !cancellation_concurrent_requesters() ||
+        !cancellation_observation_race()) {
+        return 1;
+    }
     return 0;
 }
