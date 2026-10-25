@@ -1,0 +1,14 @@
+# Coding-agent workflow
+
+1. Read `AGENTS.md`, the architecture, invariants, roadmap/status, and affected
+   contract.
+2. Inspect the current branch and worktree; preserve unrelated user changes.
+3. State scope, assumptions, and open questions in the change or ADR.
+4. Make the smallest coherent change. For D0, that means documentation only.
+5. Update status and links together with contract changes.
+6. Run `git diff --check`; run build/tests when executable code exists; run
+   relative-link and terminology checks for documentation.
+7. Review the diff for secrets, accidental generated files, production code,
+   dependency changes, and claims unsupported by evidence.
+8. Report exact HEAD SHA, files, checks, unresolved questions, and the next
+   dependency-gated milestone. Draft PRs remain draft until independent review.

@@ -1,2 +1,33 @@
 # bsky_cpp
-Modern C++17 client SDK for Bluesky and AT Protocol, featuring asynchronous APIs for posts, threads, media, profiles, social interactions, and messaging.
+
+**Modern C++17 Client SDK for Bluesky & AT Protocol.**
+
+`bsky_cpp` is a general-purpose, asynchronous client library. It is not a UI
+framework and it does not contain AI/LLM character logic. The D0 milestone is
+documentation and contract work only; no network client or public C++ API has
+been implemented yet.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) and [invariants](docs/INVARIANTS.md)
+- [Glossary](docs/GLOSSARY.md)
+- [Roadmap](docs/ROADMAP.md) and [implementation status](docs/IMPLEMENTATION_STATUS.md)
+- [API contracts](docs/contracts/CLIENT_API.md)
+- [Engineering guides](docs/guides/coding-style.md)
+- [ADR-0001](docs/adr/0001-client-architecture.md)
+- [Reference scenarios](docs/reference-scenarios.md)
+
+The canonical documentation language is English. All examples in D0 are
+conceptual and do not imply an implemented API.
+
+## Scope and status
+
+D0 establishes boundaries, typed asynchronous contracts, identity and
+authorization rules, delivery/lifetime semantics, persistence seams, and a
+dependency-gated implementation plan. See
+[`IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for the evidence
+behind every status. The next milestone is M0, the engineering scaffold.
+
+## License
+
+See [LICENSE](LICENSE).
