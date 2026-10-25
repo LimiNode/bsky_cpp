@@ -32,8 +32,10 @@ interfaces, never on a concrete HTTP library, MDBX, or an application runtime.
 An operation validates local invariants, resolves an identity and endpoint,
 constructs a typed XRPC request, submits it through the transport adapter, maps
 the response or protocol error, and completes exactly once. Cancellation and
-shutdown may complete an operation with a typed cancellation/shutdown error;
-they never invoke a callback after its lifetime has ended.
+shutdown may produce a typed terminal cancellation/shutdown error. A callback
+registration is separate from terminal completion: closing it prevents future
+dispatch, while callback quiescence is the point at which captured state may be
+destroyed.
 
 ## Async model
 

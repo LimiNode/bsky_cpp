@@ -5,10 +5,31 @@
 Current AT Protocol and Lexicon specifications define wire truth. The contract
 documents define the SDK's public behavior. ADRs record design choices and their
 trade-offs. Guides define contributor practice. Roadmap and status describe
-scope and evidence, not API behavior.
+scope and evidence, not API behavior. Code and tests implement these contracts;
+they cannot silently supersede a normative document.
 
 When sources conflict, record the conflict as an open question, link the
 authoritative source, and do not hide an assumption in a normative statement.
+
+## Authoritative protocol references
+
+- [XRPC](https://atproto.com/specs/xrpc)
+- [Lexicon](https://atproto.com/specs/lexicon)
+- [AT Protocol OAuth](https://atproto.com/specs/oauth)
+- [DID and identity](https://atproto.com/specs/did)
+- [Official AT Protocol Lexicons](https://github.com/bluesky-social/atproto/tree/main/lexicons)
+- [`app.bsky.feed.post`](https://github.com/bluesky-social/atproto/blob/main/packages/api/lexicons/app/bsky/feed/post.json)
+- [`app.bsky.feed.like`](https://github.com/bluesky-social/atproto/blob/main/packages/api/lexicons/app/bsky/feed/like.json)
+- [`app.bsky.graph.follow`](https://github.com/bluesky-social/atproto/blob/main/packages/api/lexicons/app/bsky/graph/follow.json)
+- [`app.bsky.graph.block`](https://github.com/bluesky-social/atproto/blob/main/packages/api/lexicons/app/bsky/graph/block.json)
+- [`app.bsky.graph.muteActor`](https://github.com/bluesky-social/atproto/blob/main/packages/api/lexicons/app/bsky/graph/muteActor.json)
+- [`com.atproto.repo.createRecord`](https://github.com/bluesky-social/atproto/blob/main/lexicons/com/atproto/repo/createRecord.json)
+- [`chat.bsky.convo.sendMessage`](https://github.com/bluesky-social/atproto/blob/main/packages/api/lexicons/chat/bsky/convo/sendMessage.json)
+- [Jetstream reference implementation](https://github.com/bluesky-social/jetstream)
+
+Schema links are concrete review anchors, not a promise that every schema is
+already implemented by this repository. Revalidate them when a milestone pins
+wire behavior.
 
 ## Contract requirements
 

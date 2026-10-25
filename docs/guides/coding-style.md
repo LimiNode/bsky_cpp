@@ -9,8 +9,23 @@
   default lambda captures.
 - Keep transport and persistence types behind interfaces. Public headers must
   compile without optional integrations.
+- Organize future sources as `include/bsky_cpp/` public headers, `src/` private
+  implementations, `tests/` test fixtures, and `examples/` opt-in examples.
+  Keep one primary type per file where practical.
+- Use `.hpp` for public C++ declarations, `.cpp` for compiled implementations,
+  and `.ipp`/`.tpp` only for template implementation fragments included by the
+  owning header. Do not introduce a second extension convention without an
+  ADR.
+- Use `#pragma once`; include the matching public header first in a `.cpp`, then
+  project headers, standard headers, and third-party headers in separate
+  groups. Do not rely on transitive includes or import private headers from a
+  public header.
 - Use four spaces. Keep comments factual and short; do not use ImGui-style
-  naming.
-- Document public declarations with English Doxygen: purpose, parameters,
-  result, typed errors, ownership/lifetime, thread safety, cancellation, side
-  effects, and network guarantees.
+  naming. Avoid magic domain values and default lambda captures (`[&]`, `[=]`).
+- Prefer `///` Doxygen in English. Use `\brief`, `\tparam`, `\param`,
+  `\return`, `\throws`, `\pre`, `\post`, `\invariant`, `\complexity`,
+  `\thread_safety`, and `\note`/`\warning` when meaningful. Every public
+  parameter and non-void return is documented.
+- Public documentation states ownership/lifetime, thread safety, cancellation,
+  callback quiescence, side effects, and network guarantees; `Thread-safe`,
+  `Not thread-safe`, or a precise conditional statement is required.

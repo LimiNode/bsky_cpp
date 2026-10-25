@@ -3,7 +3,7 @@
 | Term | Meaning in this SDK |
 | --- | --- |
 | AT Protocol | Federated protocol family used by Bluesky services. |
-| XRPC | JSON/CBOR request and response convention for Lexicon-defined queries and procedures. |
+| XRPC | HTTP-based request/response convention for Lexicon-defined queries and procedures; payload content types may be JSON, CBOR, binary, or multipart as defined by the operation. |
 | Lexicon | Schema and namespace language defining records and XRPC operations. |
 | DID | Decentralized identifier; stable account identity. |
 | Handle | Human-readable, changeable account name resolved to a DID. |
@@ -13,7 +13,7 @@
 | PDS | Personal Data Server; authoritative repository host for an account. |
 | AppView | Service aggregating and presenting application-oriented views. |
 | Chat Service | Service and Lexicon namespace for private messaging. |
-| DID document | Signed/discoverable document describing DID verification and services. |
+| DID document | Method-specific document resolved for a DID, containing verification and service data that must be validated according to that DID method and AT Protocol rules; not every method has the same signing model. |
 | App Password | Scoped credential intended for automation or clients that do not use OAuth. |
 | AT Protocol OAuth | OAuth profile with identity verification, PAR, PKCE, DPoP, scopes, and refresh. |
 | Facet | Rich-text annotation expressed using UTF-8 byte ranges. |

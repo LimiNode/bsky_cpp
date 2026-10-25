@@ -9,8 +9,9 @@ decision-making in applications.
 
 ## Source of truth
 
-The documentation in `docs/` is normative until executable code and tests
-supersede a contract. Read `ARCHITECTURE.md`, `INVARIANTS.md`, `ROADMAP.md`,
+The documentation in `docs/` is normative until an explicitly reviewed contract
+change is made. Executable code and tests implement the contract; they do not
+silently supersede it. Read `ARCHITECTURE.md`, `INVARIANTS.md`, `ROADMAP.md`,
 `IMPLEMENTATION_STATUS.md`, and the relevant contract before changing a public
 surface. Open questions must remain explicitly marked as open questions.
 
@@ -22,6 +23,8 @@ surface. Open questions must remain explicitly marked as open questions.
   operate without either one.
 - Never claim an operation is implemented because a conceptual snippet or a
   document exists. Update implementation status with evidence.
+- If implementation behavior must differ, update the contract and ADR/status in
+  the same change; record compatibility and migration implications.
 - Never store bearer tokens or client secrets in logs or an unencrypted
   backend without an explicit security policy.
 - No hidden blocking calls in callbacks or event handlers.

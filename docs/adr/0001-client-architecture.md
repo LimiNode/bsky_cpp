@@ -32,10 +32,12 @@ auditable, and protocol-focused.
 
 ## Consequences
 
-Implementations need explicit executors, operation policies, and typed errors.
-Applications must handle partial progress, duplicate stream delivery, token
-refresh, and recovery. More interfaces are required up front, but tests can use
-in-memory and fake adapters without a network or MDBX installation.
+Implementations need explicit executors, operation-specific retry policies, and
+typed errors. Applications must handle partial progress, duplicate stream
+delivery, token refresh, and `OutcomeUnknown` reconciliation; no generic
+idempotency key or restart-safe recovery is implied before durable M4 support.
+More interfaces are required up front, but tests can use in-memory and fake
+adapters without a network or MDBX installation.
 
 ## Open questions
 

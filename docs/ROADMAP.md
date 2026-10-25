@@ -42,9 +42,11 @@ invariant or contract from an earlier one.
 - **Deliverables:** App Password sessions, posts/replies/quotes, thread
   builder, media upload, rich text, likes/follows/blocks, and profiles.
 - **Acceptance:** StrongRef-correct replies, partial thread results, secret
-  redaction, MIME/size validation, and explicit operation ownership.
-- **Testing:** Lexicon fixtures, idempotency/retry tests, Unicode facet tests,
-  and recovery tests.
+  redaction, MIME/size validation, explicit operation ownership, and
+  process-lifetime reconciliation for uncertain/partial publication.
+- **Testing:** Lexicon fixtures, operation-specific idempotency/retry tests,
+  Unicode facet tests, and in-process recovery tests. D0/M2 do not promise
+  restart-safe recovery without durable journal/outbox support.
 - **Deferred:** OAuth, durable stream processing, and DM.
 
 ## M3 — Social Client
@@ -62,9 +64,12 @@ invariant or contract from an earlier one.
 
 - **Prerequisites:** M1–M3 contracts and security review.
 - **Deliverables:** AT Protocol OAuth (PAR, PKCE, DPoP, scopes, refresh),
-  Jetstream/stream source, optional persistence, and event-hub integration.
+  Jetstream/stream source, optional persistence, durable operation journal and
+  outbox recovery, and event-hub integration.
 - **Acceptance:** identity verification, replay/checkpoint semantics,
-  backpressure, graceful shutdown, and no mandatory optional dependency.
+  cursor-expiry/gap outcomes, backpressure, restart-safe reconciliation when a
+  durable backend is configured, graceful shutdown, and no mandatory optional
+  dependency.
 - **Testing:** fault injection, duplicate/reorder/reconnect scenarios, and
   token-rotation tests.
 - **Deferred:** exactly-once claims and provider-specific guarantees.

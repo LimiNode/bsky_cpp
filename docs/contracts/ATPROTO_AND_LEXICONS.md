@@ -12,12 +12,25 @@ An operation name, validated parameters, optional body, endpoint, auth context,
 and timeout produce a typed response or a bounded protocol error. Unknown fields
 are retained as an explicit extension value where forward compatibility matters.
 AT URI, CID, DID, Handle, and StrongRef constructors reject malformed input.
+The low-level request also records the operation's retry-safety class.
 
 ## Guarantees and errors
 
-JSON/CBOR encoding follows the current Lexicon schema. HTTP status, XRPC error
-name, retry hints, and decode failures remain distinguishable. A query may be
-retried when safe; a procedure with side effects requires idempotency evidence.
+Encoding and content negotiation follow the current Lexicon/XRPC operation;
+XRPC is not reduced to one universal JSON/CBOR shape because some operations
+use binary or multipart payloads. HTTP status, XRPC error name, retry hints,
+and decode failures remain distinguishable. A query may be retried when the
+operation is safe. A side-effecting procedure requires protocol-defined
+deduplication or a caller-supplied deterministic identity whose semantics are
+documented by that operation.
+
+For `com.atproto.repo.createRecord`, a caller may select a deterministic `rkey`
+and retry the same collection/rkey/body. A conflict is not automatically a
+failure or success: the client performs read-back reconciliation and compares
+the existing record/CID before reporting `Created`, `AlreadyExists`, or
+`OutcomeUnknown`. If no deterministic rkey or other supported deduplication is
+available, an uncertain result is not blindly retried. This rule also applies
+to `chat.bsky.convo.sendMessage`, which has no universal client idempotency key.
 
 ## Concurrency and lifetime
 
