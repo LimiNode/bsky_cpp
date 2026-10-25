@@ -5,7 +5,10 @@
 #include "test_support.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -77,6 +80,10 @@ bool result_success_and_error() {
     error.add_metadata("Authorization", "Bearer secret");
     error.add_metadata("api_key", "secret");
     error.add_metadata("payload", "untrusted server body");
+    error.add_metadata("status", "Bearer secret");
+    error.add_metadata("uri", "https://user:secret@example.test/path?token=x");
+    error.add_metadata("status_code", "Bearer secret");
+    error.add_metadata("retry_after_ms", "1000");
     bsky_cpp::Result<MoveOnly> failure(std::move(error));
     if (!BSKY_TEST_CHECK(!failure.has_value())) {
         return false;
@@ -84,7 +91,7 @@ bool result_success_and_error() {
     if (!BSKY_TEST_CHECK(failure.error().category() == bsky_cpp::ErrorCategory::Transport)) {
         return false;
     }
-    if (!BSKY_TEST_CHECK(failure.error().metadata().size() == 4)) {
+    if (!BSKY_TEST_CHECK(failure.error().metadata().size() == 8)) {
         return false;
     }
     if (!BSKY_TEST_CHECK(failure.error().metadata()[0].value == "503")) {
@@ -97,6 +104,27 @@ bool result_success_and_error() {
         return false;
     }
     if (!BSKY_TEST_CHECK(failure.error().metadata()[3].value == "<redacted>")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[4].value == "<redacted>")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[5].value == "<redacted>")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[6].key == "<redacted>" &&
+                         failure.error().metadata()[6].value == "<redacted>")) {
+        return false;
+    }
+    if (!BSKY_TEST_CHECK(failure.error().metadata()[7].value == "1000")) {
+        return false;
+    }
+
+    bsky_cpp::Error bounded(bsky_cpp::ErrorCategory::Internal, "bounded");
+    for (int index = 0; index < 32; ++index) {
+        bounded.add_metadata("status", "503");
+    }
+    if (!BSKY_TEST_CHECK(bounded.metadata().size() == 16)) {
         return false;
     }
 
@@ -222,9 +250,23 @@ bool cancellation_concurrent_requesters() {
 bool cancellation_observation_race() {
     bsky_cpp::CancellationSource source;
     const bsky_cpp::CancellationToken token = source.token();
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool observer_ready = false;
+    bool start_observation = false;
     std::atomic<bool> observed{false};
-    std::thread observer([&token, &observed]() {
-        for (int attempt = 0; attempt < 1000000; ++attempt) {
+    std::thread observer([&token, &observed, &mutex, &condition, &observer_ready,
+                          &start_observation]() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            observer_ready = true;
+        }
+        condition.notify_one();
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            condition.wait(lock, [&start_observation]() { return start_observation; });
+        }
+        for (int attempt = 0; attempt < 100000; ++attempt) {
             if (token.is_cancellation_requested()) {
                 observed.store(true, std::memory_order_release);
                 return;
@@ -234,6 +276,20 @@ bool cancellation_observation_race() {
             }
         }
     });
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (!condition.wait_for(
+                lock, std::chrono::seconds(1), [&observer_ready]() { return observer_ready; })) {
+            start_observation = true;
+            lock.unlock();
+            condition.notify_one();
+            observer.join();
+            return BSKY_TEST_CHECK(false);
+        }
+        start_observation = true;
+    }
+    condition.notify_one();
     source.request_cancellation();
     observer.join();
     return BSKY_TEST_CHECK(observed.load(std::memory_order_acquire));

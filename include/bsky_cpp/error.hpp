@@ -52,16 +52,19 @@ public:
     /// Returns the operation name, if supplied.
     const std::string& operation() const noexcept;
 
-    /// Adds metadata through the safe-key allowlist; secret or unknown keys are
-    /// replaced with `<redacted>` and accepted values are bounded.
+    /// Adds metadata through an exact-key, field-aware allowlist. Unknown keys,
+    /// invalid values, and values that exceed the bounded metadata budget are
+    /// redacted or rejected; this is not a universal sanitizer for arbitrary
+    /// text.
     void add_metadata(std::string key, std::string value);
 
     /// Returns redacted diagnostic metadata.
     const std::vector<Metadata>& metadata() const noexcept;
 
 private:
-    static bool is_sensitive_key(std::string_view key) noexcept;
-    static bool is_safe_key(std::string_view key) noexcept;
+    static bool is_allowed_key(std::string_view key) noexcept;
+    static bool is_valid_value(std::string_view key, std::string_view value) noexcept;
+    std::size_t metadata_bytes() const noexcept;
 
     ErrorCategory m_category;
     std::string m_message;
