@@ -43,9 +43,24 @@ invariant or contract from an earlier one.
 - **Deferred:** network futures, executors, and callback machinery until the
   async vocabulary is selected by ADR.
 
+### M0c — Async API and execution contract (docs-only)
+
+- **Prerequisites:** M0b primitives and ADR-0001.
+- **Deliverables:** ADR-0002, callback-first operation contracts,
+  `OperationHandle`/executor/lifetime policy, conceptual C++17 snippets, and
+  the async conformance test plan.
+- **Acceptance:** admission, terminal outcome, callback delivery, cancellation
+  races, executor ownership, shutdown/quiescence, backpressure, and optional
+  future-adapter boundaries are explicit and internally consistent.
+- **Testing:** Markdown link checks, terminology review, and conformance cases
+  ready for deterministic fake transport/executor implementation.
+- **Deferred:** transport, XRPC, executor implementation, and callback
+  machinery remain out of scope.
+
 ## M1 — AT Protocol Foundation
 
-- **Prerequisites:** M0; current XRPC/Lexicon specifications pinned for tests.
+- **Prerequisites:** M0c; current XRPC/Lexicon specifications pinned for
+  tests.
 - **Deliverables:** transport adapter, XRPC query/procedure API, DID/Handle
   resolution, AT URI/CID/StrongRef values, discovery and public read APIs.
 - **Acceptance:** typed protocol errors, safe endpoint selection, timeout and
