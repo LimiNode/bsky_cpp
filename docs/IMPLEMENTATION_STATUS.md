@@ -1,7 +1,7 @@
 # Implementation status
 
-This inventory is factual for the repository at D0. A document, example, or
-roadmap item is not evidence of an implementation.
+This inventory is factual for the repository state represented by this branch.
+A document, example, or roadmap item is not evidence of an implementation.
 
 ## Implemented
 
@@ -13,24 +13,28 @@ roadmap item is not evidence of an implementation.
 
 ## Partial
 
-- M0 is partial: M0a is implemented; `Result`, typed `Error`, and cancellation
-  primitives remain M0b work.
+- M0 is partial: M0a and the M0b `Result`, typed `Error`, and basic
+  cancellation source/token primitives are implemented; async executor,
+  callback, and network machinery remain deferred.
 
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
+- Full async vocabulary, callback registration/quiescence machinery, and
+  network operation futures remain contract-only while ADR-0001 is open.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
   events/streaming, delivery/lifetime, and persistence seams.
 - Coding, dependency, agent, documentation, and commit governance.
 
 ## Planned
 
-- M0b through M5 work described in [`ROADMAP.md`](ROADMAP.md).
+- Remaining M0 async integration through M5 work described in
+  [`ROADMAP.md`](ROADMAP.md).
 
 ## Deferred
 
-- Production code, CMake, CI implementation, network integrations, generated
-  Lexicon classes, event-hub-cpp/MDBX adapters, and AI/LLM logic.
+- Network integrations, generated Lexicon classes, event-hub-cpp/MDBX adapters,
+  full async callback/executor machinery, and AI/LLM logic.
 
 ## Evidence rule
 

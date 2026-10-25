@@ -15,6 +15,8 @@ option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
 
 add_library(bsky_cpp STATIC
+    src/cancellation.cpp
+    src/error.cpp
     src/version.cpp
 )
 add_library(bsky_cpp::bsky_cpp ALIAS bsky_cpp)
