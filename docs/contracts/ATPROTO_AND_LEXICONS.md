@@ -21,8 +21,9 @@ XRPC is not reduced to one universal JSON/CBOR shape because some operations
 use binary or multipart payloads. HTTP status, XRPC error name, retry hints,
 and decode failures remain distinguishable. A query may be retried when the
 operation is safe. A side-effecting procedure requires protocol-defined
-deduplication or a caller-supplied deterministic identity whose semantics are
-documented by that operation.
+deduplication or an adapter contract that explicitly guarantees the caller's
+deterministic identity is honored. A deterministic value without such a
+protocol/adapter guarantee is not sufficient.
 
 For `com.atproto.repo.createRecord`, a caller may select a deterministic `rkey`
 and retry the same collection/rkey/body. A conflict is not automatically a

@@ -35,7 +35,8 @@ the response or protocol error, and completes exactly once. Cancellation and
 shutdown may produce a typed terminal cancellation/shutdown error. A callback
 registration is separate from terminal completion: closing it prevents future
 dispatch, while callback quiescence is the point at which captured state may be
-destroyed.
+destroyed. The terminal outcome remains retained until all operation-owned
+resources and active callback invocations are quiescent.
 
 ## Async model
 

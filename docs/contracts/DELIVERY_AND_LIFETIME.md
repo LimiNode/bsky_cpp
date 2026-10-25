@@ -13,12 +13,12 @@ typed result and optional progress/diagnostic events that are safe to retain.
 
 ## Guarantees and errors
 
-Completion is at-most-once and is distinct from a cancellation request. A
-cancellation request stops work that has not started where possible; it does
-not forcibly interrupt transport code or a user callback already executing. If
-the request wins the terminal-completion race, the result is `Cancelled`; a
-completion that won first is delivered unchanged. Deadline expiry is `TimedOut`;
-client shutdown is `Shutdown`.
+An accepted operation reaches exactly one internal terminal outcome and is
+distinct from callback delivery. A cancellation request stops work that has not
+started where possible; it does not forcibly interrupt transport code or a user
+callback already executing. If the request wins the terminal-completion race,
+the result is `Cancelled`; a completion that won first is delivered unchanged.
+Deadline expiry is `TimedOut`; client shutdown is `Shutdown`.
 
 Retries consume a bounded budget and are permitted only by the operation-specific
 retry policy in the relevant contract. A generic idempotency key is not a
@@ -47,8 +47,13 @@ the adapter policy and cannot bypass terminal completion.
 The client owns in-flight state through terminal completion and callback
 quiescence. Shutdown is idempotent, rejects new work after its acceptance
 boundary, stops intake, and then either drains or aborts active operations under
-an explicit deadline. Shutdown completion includes the documented callback
-quiescence guarantee; it never promises to forcibly stop user code.
+an explicit deadline. A successful shutdown result (`Quiesced`) includes the
+callback-quiescence guarantee. If the deadline expires first, shutdown returns
+an explicit `QuiescencePending`/`ShutdownTimedOut` result and retains the
+operation-owned state and callback registrations needed by active callbacks;
+it must not destroy that state to make the deadline appear successful. A later
+quiescence event may complete cleanup. Shutdown never promises to forcibly stop
+user code.
 
 ## Integration boundary
 

@@ -6,9 +6,12 @@ These rules are testable acceptance criteria for every implementation milestone.
    required.
 2. **Layering:** high-level DTOs do not expose kurlyk, event-hub-cpp, MDBX, or
    another concrete backend type.
-3. **Completion:** each asynchronous operation has one terminal completion at
-   most. A cancellation request is not itself completion: it only asks the
-   operation to stop work that has not started or cannot safely continue.
+3. **Completion:** an accepted asynchronous operation reaches exactly one
+   internal terminal outcome. A cancellation request is not itself completion:
+   it only asks the operation to stop work that has not started or cannot safely
+   continue. Each callback registration receives at most one delivery, and
+   closing that registration may suppress its delivery without changing the
+   operation's terminal outcome.
 4. **Cancellation and callbacks:** cancellation is cooperative and observable.
    If cancellation wins the completion race, the terminal result is
    `Cancelled`; if the operation already completed, its original result wins.
@@ -18,8 +21,9 @@ These rules are testable acceptance criteria for every implementation milestone.
    destroyed.
 5. **Retry safety:** retries are operation-specific. A read may retry when the
    source and policy say it is safe; a side-effecting procedure may retry only
-   when its Lexicon/protocol semantics provide deduplication or the caller has
-   supplied a deterministic operation identity. A key by itself never proves
+   when its Lexicon/protocol semantics provide deduplication or an adapter
+   contract explicitly guarantees that the caller-supplied deterministic
+   operation identity is honored. Determinism by itself never proves
    idempotency, and uncertain side effects are reconciled rather than blindly
    repeated.
 6. **Identity:** a DID is stable account identity; a Handle is mutable naming.
