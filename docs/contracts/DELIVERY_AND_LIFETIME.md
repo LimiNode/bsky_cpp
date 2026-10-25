@@ -13,6 +13,9 @@ typed result and optional progress/diagnostic events that are safe to retain.
 Local validation happens before admission. An invalid request fails
 synchronously and creates no operation. An accepted operation owns its input
 values and remains valid after the caller destroys the request object.
+The conceptual API returns `Result<OperationHandle>` for this boundary: a
+failure means no operation was admitted and no callback may be invoked; success
+means the terminal delivery channel is now owned by the accepted operation.
 
 ## Guarantees and errors
 
@@ -47,10 +50,25 @@ short or dispatch work elsewhere. Callback exceptions are captured according to
 the adapter policy and cannot bypass terminal completion.
 
 The executor is an injected lifetime owner for queued and running callback
-dispatch. Destroying an ordinary operation handle does not cancel the operation;
-an explicit cancellation scope is required for cancellation-on-scope-exit.
+dispatch. The client normally retains an executor lease through terminal
+completion and callback quiescence. A borrowed executor is valid only through
+an explicit adapter with a caller-owned lifetime guarantee. Destroying an
+ordinary operation handle does not cancel the operation; an explicit
+cancellation scope is required for cancellation-on-scope-exit.
 Move-only callbacks are supported without requiring a copyable
 `std::function`.
+
+If the executor rejects work before admission, the call returns a synchronous
+admission failure. If rejection occurs after admission, the operation records a
+single typed dispatch failure according to the adapter policy. There is no
+implicit synchronous fallback that would violate the documented dispatch
+contract. An executor stopping with queued callbacks must either reject them
+through that path or run them under its documented drain policy.
+
+The callback and optional future adapter are alternative delivery channels. The
+handle provides control and status observation, not a second copy of a
+potentially move-only payload. A future adapter owns the one-shot result when
+selected; a callback registration owns it when callback delivery is selected.
 
 ## Concurrency and shutdown lifetime
 
@@ -64,6 +82,21 @@ operation-owned state and callback registrations needed by active callbacks;
 it must not destroy that state to make the deadline appear successful. A later
 quiescence event may complete cleanup. Shutdown never promises to forcibly stop
 user code.
+
+Client destruction initiates the same stop-intake/shutdown transition. Shared
+operation state and the executor lease outlive the `Client` object until their
+terminal and callback-quiescence obligations are complete; they must not refer
+back to destroyed client storage. If a shutdown deadline expires, the client
+may return while shared state reports `QuiescencePending`/
+`ShutdownTimedOut`; later cleanup is owned by that shared state and executor,
+not by a use-after-free path in the destroyed client.
+
+Callback registration races use the following rule: a callback queued but not
+started checks registration state at dispatch time and may be suppressed after
+`close`; a callback that has begun is in-flight and is allowed to finish. A
+quiescence wait completes only after all in-flight callbacks finish and all
+queued registrations are either delivered or suppressed. Closing a registration
+does not alter the operation's terminal outcome.
 
 ## Integration boundary
 

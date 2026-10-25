@@ -51,6 +51,11 @@ Use a callback-first operation contract with these conceptual components:
 - a `std::future` adapter is optional and must not change cancellation or
   lifetime semantics.
 
+Admission returns `Result<OperationHandle>`. A failure is synchronous and means
+that no operation was admitted and no callback may be invoked. A successful
+result admits the operation; its callback (or selected future adapter) receives
+the one terminal payload asynchronously.
+
 Destroying an ordinary `OperationHandle` releases that observer/control
 reference; it does not implicitly cancel the network operation. A separate
 RAII cancellation scope may request cancellation on scope exit when an
@@ -61,6 +66,29 @@ its callback is delivered, suppressed, or throws. Completion and cancellation
 use a first-winner rule: cancellation wins only if it reaches the operation
 before terminal completion. Callback delivery is never synchronous from an
 API method unless that method explicitly documents the exception.
+
+The handle owns control and status observation, not an implicit second copy of
+the typed payload. Callback delivery and the optional future adapter are
+mutually exclusive one-shot delivery channels for a move-only result.
+
+The client normally owns an executor lifetime lease (for example, a shared
+executor object) and each accepted operation retains that lease through
+terminal completion and callback quiescence. A borrowed executor requires an
+explicit adapter and a caller-provided lifetime guarantee. Rejection before
+admission is a synchronous `Result` failure; rejection after admission becomes
+one typed terminal dispatch error. Implementations must not silently run a
+callback synchronously as a fallback. A stopping executor must either reject
+queued callbacks through that policy or drain them under its documented rules.
+
+Client destruction stops admission and initiates shutdown. Operation state and
+executor leases are shared independently of the `Client` object, so a
+`QuiescencePending`/`ShutdownTimedOut` result can safely outlive the client
+without retaining pointers into destroyed client storage.
+
+For callback registration, a queued callback checks registration state when the
+executor starts it. Closing before that check suppresses delivery; a callback
+that has started is in-flight and may finish. Quiescence means no in-flight
+callback remains and every queued registration is delivered or suppressed.
 
 ## Required guarantees
 
