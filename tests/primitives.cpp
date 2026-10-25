@@ -254,9 +254,11 @@ bool cancellation_observation_race() {
     std::condition_variable condition;
     bool observer_ready = false;
     bool start_observation = false;
+    bool initial_observation = false;
     std::atomic<bool> observed{false};
-    std::thread observer([&token, &observed, &mutex, &condition, &observer_ready,
-                          &start_observation]() {
+    std::atomic<bool> stop_observation{false};
+    std::thread observer([&token, &observed, &stop_observation, &mutex, &condition,
+                          &observer_ready, &start_observation, &initial_observation]() {
         {
             std::lock_guard<std::mutex> lock(mutex);
             observer_ready = true;
@@ -266,14 +268,18 @@ bool cancellation_observation_race() {
             std::unique_lock<std::mutex> lock(mutex);
             condition.wait(lock, [&start_observation]() { return start_observation; });
         }
-        for (int attempt = 0; attempt < 100000; ++attempt) {
+        while (!stop_observation.load(std::memory_order_acquire)) {
             if (token.is_cancellation_requested()) {
                 observed.store(true, std::memory_order_release);
+                condition.notify_one();
                 return;
             }
-            if ((attempt % 256) == 0) {
-                std::this_thread::yield();
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                initial_observation = true;
             }
+            condition.notify_one();
+            std::this_thread::yield();
         }
     });
 
@@ -281,6 +287,7 @@ bool cancellation_observation_race() {
         std::unique_lock<std::mutex> lock(mutex);
         if (!condition.wait_for(
                 lock, std::chrono::seconds(1), [&observer_ready]() { return observer_ready; })) {
+            stop_observation.store(true, std::memory_order_release);
             start_observation = true;
             lock.unlock();
             condition.notify_one();
@@ -290,7 +297,36 @@ bool cancellation_observation_race() {
         start_observation = true;
     }
     condition.notify_one();
-    source.request_cancellation();
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (!condition.wait_for(lock, std::chrono::seconds(1),
+                               [&initial_observation]() { return initial_observation; })) {
+            stop_observation.store(true, std::memory_order_release);
+            lock.unlock();
+            observer.join();
+            return BSKY_TEST_CHECK(false);
+        }
+    }
+
+    if (!BSKY_TEST_CHECK(source.request_cancellation())) {
+        stop_observation.store(true, std::memory_order_release);
+        observer.join();
+        return false;
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (!condition.wait_for(lock, std::chrono::seconds(1), [&observed]() {
+                return observed.load(std::memory_order_acquire);
+            })) {
+            stop_observation.store(true, std::memory_order_release);
+            lock.unlock();
+            observer.join();
+            return BSKY_TEST_CHECK(false);
+        }
+    }
+    stop_observation.store(true, std::memory_order_release);
     observer.join();
     return BSKY_TEST_CHECK(observed.load(std::memory_order_acquire));
 }
