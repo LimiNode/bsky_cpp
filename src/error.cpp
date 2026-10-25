@@ -62,6 +62,19 @@ bool is_safe_uri(std::string_view value) noexcept {
            value.find('#') == std::string_view::npos;
 }
 
+bool is_safe_host(std::string_view value) noexcept {
+    if (value.empty() || value.size() > kMaxMetadataValueBytes) {
+        return false;
+    }
+    for (const unsigned char character : value) {
+        if (!(std::isalnum(character) || character == '.' || character == '-' ||
+              character == ':' || character == '[' || character == ']')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 const char* error_category_name(ErrorCategory category) noexcept {
@@ -165,6 +178,9 @@ bool Error::is_valid_value(std::string_view key, std::string_view value) noexcep
     }
     if (key == "uri") {
         return is_safe_uri(value);
+    }
+    if (key == "endpoint_host") {
+        return is_safe_host(value);
     }
     return is_safe_token(value);
 }
