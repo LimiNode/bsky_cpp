@@ -25,6 +25,24 @@ invariant or contract from an earlier one.
 - **Testing:** compiler matrix, sanitizers, unit tests, and diff/link checks.
 - **Deferred:** real XRPC calls and generated Lexicons.
 
+### M0a — Project scaffold (current on the stacked M0a branch)
+
+- **Scope:** C++17 CMake library target, public include layout, install/export,
+  smoke test, CTest, documentation link check, and cross-platform CI.
+- **Acceptance:** a consumer uses `find_package(bsky_cpp CONFIG REQUIRED)` and
+  links `bsky_cpp::bsky_cpp` without optional dependencies.
+- **Deferred:** Result/Error/cancellation semantics and all network behavior.
+
+### M0b — Core primitives
+
+- **Prerequisites:** M0a.
+- **Deliverables:** `Result<T>`, `Result<void>`, typed `Error`, diagnostic
+  metadata redaction, cancellation source/token, and focused tests.
+- **Acceptance:** C++17 success/error paths, move-only results, concurrent and
+  repeated cancellation, owner destruction, and applicable race tests pass.
+- **Deferred:** network futures, executors, and callback machinery until the
+  async vocabulary is selected by ADR.
+
 ## M1 — AT Protocol Foundation
 
 - **Prerequisites:** M0; current XRPC/Lexicon specifications pinned for tests.
