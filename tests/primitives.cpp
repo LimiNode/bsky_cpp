@@ -270,7 +270,10 @@ bool cancellation_observation_race() {
         }
         while (!stop_observation.load(std::memory_order_acquire)) {
             if (token.is_cancellation_requested()) {
-                observed.store(true, std::memory_order_release);
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    observed.store(true, std::memory_order_release);
+                }
                 condition.notify_one();
                 return;
             }
