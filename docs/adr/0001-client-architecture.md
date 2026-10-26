@@ -1,6 +1,7 @@
 # ADR-0001: Client architecture and optional infrastructure
 
-- **Status:** Accepted for D0; implementation details remain subject to review.
+- **Status:** Accepted for D0; async execution details are refined by
+  [ADR-0002](0002-async-execution-contract.md).
 - **Date:** 2026-10-25
 
 ## Context
@@ -41,8 +42,8 @@ adapters without a network or MDBX installation.
 
 ## Open questions
 
-- Which future async vocabulary (future/callback/sender adapter) best balances
-  ABI stability and C++17 usability?
+- Which concrete executor adapters should be supported first under
+  [ADR-0002](0002-async-execution-contract.md)?
 - Which supported stream providers and event ordering guarantees should M4
   standardize?
 - What protected credential stores should official adapters target on each OS?

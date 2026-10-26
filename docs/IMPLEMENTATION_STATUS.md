@@ -20,15 +20,16 @@ A document, example, or roadmap item is not evidence of an implementation.
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
-- Full async vocabulary, callback registration/quiescence machinery, and
-  network operation futures remain contract-only while ADR-0001 is open.
+- The M0c async vocabulary, callback registration/quiescence contract, and
+  optional future-adapter boundary are documented in ADR-0002 and remain
+  contract-only; no executor or callback implementation is included.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
   events/streaming, delivery/lifetime, and persistence seams.
 - Coding, dependency, agent, documentation, and commit governance.
 
 ## Planned
 
-- Remaining M0 async integration through M5 work described in
+- Remaining M0 async implementation through M5 work described in
   [`ROADMAP.md`](ROADMAP.md).
 
 ## Deferred
