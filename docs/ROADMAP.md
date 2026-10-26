@@ -33,7 +33,7 @@ invariant or contract from an earlier one.
   links `bsky_cpp::bsky_cpp` without optional dependencies.
 - **Deferred:** Result/Error/cancellation semantics and all network behavior.
 
-### M0b — Core primitives
+### M0b — Core primitives (current on the stacked M0b branch)
 
 - **Prerequisites:** M0a.
 - **Deliverables:** `Result<T>`, `Result<void>`, typed `Error`, diagnostic
