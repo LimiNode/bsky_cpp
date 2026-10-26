@@ -17,6 +17,7 @@ option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers
 add_library(bsky_cpp STATIC
     src/cancellation.cpp
     src/error.cpp
+    src/identifiers.cpp
     src/version.cpp
 )
 add_library(bsky_cpp::bsky_cpp ALIAS bsky_cpp)

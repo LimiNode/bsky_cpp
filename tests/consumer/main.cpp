@@ -1,5 +1,6 @@
 #include <bsky_cpp/cancellation.hpp>
 #include <bsky_cpp/error.hpp>
+#include <bsky_cpp/identifiers.hpp>
 #include <bsky_cpp/result.hpp>
 
 #include <string>
@@ -24,6 +25,20 @@ int main() {
     const bsky_cpp::CancellationToken token = source.token();
     if (token.is_cancellation_requested() || !source.request_cancellation() ||
         !token.is_cancellation_requested()) {
+        return 1;
+    }
+
+    auto did = bsky_cpp::Did::parse("did:plc:z72i7hdynmk6r22z27s6tvur");
+    auto handle = bsky_cpp::Handle::parse("Alice.Example.COM");
+    auto uri = bsky_cpp::AtUri::parse(
+        "at://alice.example.com/com.atproto.repo.create/3jfc");
+    auto cid = bsky_cpp::Cid::parse(
+        "bafyreiaaaebagbafaydqqcikbmga2dqpcaireeyuculbogazdinryhi6d4");
+    if (!did || !handle || !uri || !cid || !cid.value().is_atproto()) {
+        return 1;
+    }
+    auto strong_ref = bsky_cpp::StrongRef::create(uri.value(), cid.value());
+    if (!strong_ref) {
         return 1;
     }
     return 0;

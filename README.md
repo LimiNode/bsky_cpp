@@ -3,10 +3,11 @@
 **Modern C++17 Client SDK for Bluesky & AT Protocol.**
 
 `bsky_cpp` is a general-purpose, asynchronous client library. It is not a UI
-framework and it does not contain AI/LLM character logic. The M0a/M0b
-milestones provide the C++17 scaffold, `Result`, typed `Error`, and
-cooperative cancellation primitives. The network client, XRPC, and async
-executor implementation remain deferred.
+framework and it does not contain AI/LLM character logic. The M0 milestones
+provide the C++17 scaffold, `Result`, typed `Error`, cooperative cancellation,
+and the documented async contract. M1a adds strict value types for AT Protocol
+identifiers. The network client, XRPC, and async executor implementation
+remain deferred.
 
 ## Documentation
 
@@ -14,6 +15,7 @@ executor implementation remain deferred.
 - [Glossary](docs/GLOSSARY.md)
 - [Roadmap](docs/ROADMAP.md) and [implementation status](docs/IMPLEMENTATION_STATUS.md)
 - [API contracts](docs/contracts/CLIENT_API.md)
+- [Identifier contract](docs/contracts/IDENTIFIERS.md)
 - [Engineering guides](docs/guides/coding-style.md)
 - [ADR-0001](docs/adr/0001-client-architecture.md)
 - [ADR-0002](docs/adr/0002-async-execution-contract.md)
