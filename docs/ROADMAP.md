@@ -1,0 +1,85 @@
+# Roadmap
+
+Progress is dependency-gated. A later milestone cannot silently bypass an
+invariant or contract from an earlier one.
+
+## D0 — Architecture Foundation (current)
+
+- **Scope:** documentation, contracts, governance, terminology, and ADR.
+- **Prerequisites:** repository baseline and current AT Protocol references.
+- **Deliverables:** architecture, invariants, all contract documents, guides,
+  status, scenarios, and roadmap.
+- **Acceptance:** links resolve, terms are consistent, every contract states
+  inputs/outputs/errors/lifetime/concurrency, and no implementation is implied.
+- **Testing:** `git diff --check`, documentation link and terminology checks.
+- **Deferred:** all production code, dependencies, generated schemas, and
+  network integrations.
+
+## M0 — Engineering Scaffold
+
+- **Prerequisites:** D0 contracts approved.
+- **Deliverables:** CMake targets, C++17 library layout, test harness, CI,
+  `Result`/error/cancellation primitives, and documentation checks.
+- **Acceptance:** clean configure/build/test with no optional backend required;
+  negative and cancellation paths are tested.
+- **Testing:** compiler matrix, sanitizers, unit tests, and diff/link checks.
+- **Deferred:** real XRPC calls and generated Lexicons.
+
+## M1 — AT Protocol Foundation
+
+- **Prerequisites:** M0; current XRPC/Lexicon specifications pinned for tests.
+- **Deliverables:** transport adapter, XRPC query/procedure API, DID/Handle
+  resolution, AT URI/CID/StrongRef values, discovery and public read APIs.
+- **Acceptance:** typed protocol errors, safe endpoint selection, timeout and
+  cancellation behavior, and conformance fixtures.
+- **Testing:** wire fixtures, malformed input, redirect/SSRF policy, and retry
+  safety tests.
+- **Deferred:** authenticated writes, UI, and AI orchestration.
+
+## M2 — Authenticated Client
+
+- **Prerequisites:** M1 and a reviewed credential-store seam.
+- **Deliverables:** App Password sessions, posts/replies/quotes, thread
+  builder, media upload, rich text, likes/follows/blocks, and profiles.
+- **Acceptance:** StrongRef-correct replies, partial thread results, secret
+  redaction, MIME/size validation, explicit operation ownership, and
+  process-lifetime reconciliation for uncertain/partial publication.
+- **Testing:** Lexicon fixtures, operation-specific idempotency/retry tests,
+  Unicode facet tests, and in-process recovery tests. D0/M2 do not promise
+  restart-safe recovery without durable journal/outbox support.
+- **Deferred:** OAuth, durable stream processing, and DM.
+
+## M3 — Social Client
+
+- **Prerequisites:** M2 and current app/chat schemas.
+- **Deliverables:** notifications, direct messages, multiple accounts,
+  advanced media, and remaining social operations.
+- **Acceptance:** public notifications/replies are distinct from private chat;
+  routing and authorization are explicit.
+- **Testing:** account isolation, pagination, permission failures, and load
+  limits.
+- **Deferred:** production-grade replay and optional integrations.
+
+## M4 — Advanced Infrastructure
+
+- **Prerequisites:** M1–M3 contracts and security review.
+- **Deliverables:** AT Protocol OAuth (PAR, PKCE, DPoP, scopes, refresh),
+  Jetstream/stream source, optional persistence, durable operation journal and
+  outbox recovery, and event-hub integration.
+- **Acceptance:** identity verification, replay/checkpoint semantics,
+  cursor-expiry/gap outcomes, backpressure, restart-safe reconciliation when a
+  durable backend is configured, graceful shutdown, and no mandatory optional
+  dependency.
+- **Testing:** fault injection, duplicate/reorder/reconnect scenarios, and
+  token-rotation tests.
+- **Deferred:** exactly-once claims and provider-specific guarantees.
+
+## M5 — Production Hardening
+
+- **Prerequisites:** all required feature milestones and operational owners.
+- **Deliverables:** conformance suite, fault injection, recovery drills,
+  concurrency/security audits, observability, and release criteria.
+- **Acceptance:** documented SLOs, reproducible builds, threat-model closure,
+  and reviewed migration/recovery procedures.
+- **Testing:** continuous integration matrix, fuzzing, sanitizers, and soak tests.
+- **Deferred:** features without a supported protocol contract.
