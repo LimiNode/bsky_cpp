@@ -14,7 +14,7 @@ constexpr std::size_t kMaxDidLength = 2048U;
 constexpr std::size_t kMaxHandleLength = 253U;
 constexpr std::size_t kMaxNsidLength = 317U;
 constexpr std::size_t kMaxRecordKeyLength = 512U;
-constexpr std::size_t kMaxAtUriLength = 2048U;
+constexpr std::size_t kMaxAtUriLength = 8192U;
 constexpr std::size_t kMaxCidLength = 256U;
 constexpr std::uint64_t kDagCborCodec = 0x71U;
 constexpr std::uint64_t kRawCodec = 0x55U;
@@ -51,6 +51,54 @@ int hex_value(char character) noexcept {
 bool valid_percent(std::string_view value, std::size_t index) noexcept {
     return index + 2U < value.size() && value[index] == '%' &&
            is_hex(value[index + 1U]) && is_hex(value[index + 2U]);
+}
+
+bool is_uri_unreserved(char character) noexcept {
+    return is_alpha(character) || is_digit(character) || character == '-' ||
+           character == '.' || character == '_' || character == '~';
+}
+
+bool is_uri_subdelim(char character) noexcept {
+    switch (character) {
+    case '!': case '$': case '&': case '\'': case '(': case ')': case '*':
+    case '+': case ',': case ';': case '=':
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool valid_uri_component(std::string_view value, bool fragment) noexcept {
+    if (fragment && (value.empty() || value.front() != '/')) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        const unsigned char byte = static_cast<unsigned char>(value[index]);
+        if (value[index] == '%') {
+            if (!valid_percent(value, index)) {
+                return false;
+            }
+            index += 2U;
+            continue;
+        }
+        if (byte < 0x21U || byte > 0x7eU) {
+            return false;
+        }
+        const char character = static_cast<char>(byte);
+        if (!(is_uri_unreserved(character) || is_uri_subdelim(character) ||
+              character == ':' || character == '@' || character == '/' ||
+              character == '?')) {
+            return false;
+        }
+        if (fragment && character == '~') {
+            if (index + 1U >= value.size() ||
+                (value[index + 1U] != '0' && value[index + 1U] != '1')) {
+                return false;
+            }
+            ++index;
+        }
+    }
+    return true;
 }
 
 bool valid_did_value(std::string_view value) noexcept {
@@ -121,6 +169,10 @@ int base32_value(char character) noexcept {
 }
 
 std::vector<std::uint8_t> decode_base32(std::string_view value) {
+    const std::size_t remainder = value.size() % 8U;
+    if (remainder == 1U || remainder == 3U || remainder == 6U) {
+        return {};
+    }
     std::vector<std::uint8_t> output;
     std::uint32_t buffer = 0U;
     int bits = 0;
@@ -458,8 +510,8 @@ Result<AtUri> AtUri::parse(std::string value) {
         return Result<AtUri>::failure(invalid("aturi.parse", "AT URI requires authority"));
     }
     const std::string raw_authority = value.substr(5U, authority_limit - 5U);
-    if (raw_authority.find('@') != std::string::npos || raw_authority.find('%') != std::string::npos) {
-        return Result<AtUri>::failure(invalid("aturi.parse", "userinfo and escaped authority are not allowed"));
+    if (raw_authority.find('@') != std::string::npos) {
+        return Result<AtUri>::failure(invalid("aturi.parse", "userinfo is not allowed"));
     }
 
     std::string collection_string;
@@ -491,15 +543,16 @@ Result<AtUri> AtUri::parse(std::string value) {
     std::optional<std::string> query;
     if (query_pos != std::string::npos) {
         const std::size_t query_end = fragment_pos == std::string::npos ? value.size() : fragment_pos;
-        if (query_pos + 1U == query_end || value.substr(query_pos + 1U, query_end - query_pos - 1U).find_first_of(" \t\r\n") != std::string::npos) {
+        if (query_pos + 1U == query_end ||
+            !valid_uri_component(value.substr(query_pos + 1U,
+                                              query_end - query_pos - 1U), false)) {
             return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI query"));
         }
         query = value.substr(query_pos + 1U, query_end - query_pos - 1U);
     }
     std::optional<std::string> fragment;
     if (fragment_pos != std::string::npos) {
-        if (fragment_pos + 1U == value.size() ||
-            value.substr(fragment_pos + 1U).find_first_of(" \t\r\n#") != std::string::npos) {
+        if (!valid_uri_component(value.substr(fragment_pos + 1U), true)) {
             return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI fragment"));
         }
         fragment = value.substr(fragment_pos + 1U);

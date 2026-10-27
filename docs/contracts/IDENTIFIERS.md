@@ -45,8 +45,11 @@ acceptance data; CID and StrongRef semantics have additional focused tests.
   character set, and rejects `%`, `.` and `..` path controls.
 - `AtUri::parse()` accepts `at://` URIs with a DID or handle authority, an
   optional NSID collection, an optional record key, and optional non-empty
-  query/fragment components. Userinfo, escaped authorities, trailing/extra
-  path segments, and empty query/fragment components are rejected.
+  query/JSON-Pointer fragment components. DID authorities may contain valid
+  percent escapes; handle authorities may not. Userinfo, trailing/extra path
+  segments, malformed percent escapes, non-ASCII components, and empty
+  query/fragment components are rejected. The defensive URI limit is 8192
+  bytes.
 - `Cid::parse()` structurally decodes CIDv0 and CIDv1 multibase forms. CIDv1
   varints and the multihash length are checked before canonicalizing to
   lowercase base32. `is_atproto_record()` recognizes CIDv1 + dag-cbor and
@@ -56,8 +59,8 @@ acceptance data; CID and StrongRef semantics have additional focused tests.
   an AT Protocol CID.
 
 All parsers return `Result<T>` with `ErrorCategory::InvalidArgument` on
-malformed input. Length limits are defensive implementation limits, not a
-replacement for protocol validation.
+malformed input. DID, NSID, and record-key limits remain independently bounded;
+the 8192-byte AT URI limit is applied to the complete URI.
 
 ## Deliberately deferred
 

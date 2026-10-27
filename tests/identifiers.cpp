@@ -89,16 +89,32 @@ int main() {
                              "at://alice.example.com/com.atproto.repo.create/3jfc")) return 1;
     auto did_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur/com.atproto.repo");
     if (!BSKY_TEST_CHECK(did_uri && did_uri.value().is_did_based() && !did_uri.value().is_record())) return 1;
-    auto authority_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur#profile");
+    auto authority_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur#/profile");
     if (!BSKY_TEST_CHECK(authority_uri && authority_uri.value().collection().empty() &&
-                         authority_uri.value().fragment().value() == "profile" &&
+                         authority_uri.value().fragment().value() == "/profile" &&
                          authority_uri.value().to_string() ==
-                             "at://did:plc:z72i7hdynmk6r22z27s6tvur#profile")) return 1;
+                             "at://did:plc:z72i7hdynmk6r22z27s6tvur#/profile")) return 1;
     auto query_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur?foo=bar");
     if (!BSKY_TEST_CHECK(query_uri && query_uri.value().query().value() == "foo=bar")) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com#profile"))) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com?x=%ZZ"))) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com?x=\xF0\x9F\x92\xA9"))) return 1;
+    if (!BSKY_TEST_CHECK(static_cast<bool>(AtUri::parse(
+            "at://alice.example.com?x=%F0%9F%92%A9#/profile")))) return 1;
+    auto web_authority = AtUri::parse(
+        "at://did:web:localhost%3A3000/app.bsky.actor.profile/self");
+    if (!BSKY_TEST_CHECK(web_authority && web_authority.value().is_did_based())) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse(
+            "at://did:web:localhost%3/app.bsky.actor.profile/self"))) return 1;
     if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com/com.atproto.repo/x/y"))) return 1;
     if (!BSKY_TEST_CHECK(!AtUri::parse("at://user:pass@alice.example.com/com.atproto.repo/x"))) return 1;
     if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com/com.atproto.repo/x?"))) return 1;
+    const std::string long_did = "did:example:" + std::string(2030U, 'a');
+    const std::string long_uri = "at://" + long_did + "/com.example.foo/self";
+    if (!BSKY_TEST_CHECK(long_uri.size() > 2048U && long_uri.size() <= 8192U &&
+                         AtUri::parse(long_uri))) return 1;
+    const std::string oversized_uri = "at://alice.example.com?x=" + std::string(8200U, 'a');
+    if (!BSKY_TEST_CHECK(oversized_uri.size() > 8192U && !AtUri::parse(oversized_uri))) return 1;
 
     const std::string at_cid_text = cid_v1(0x71U);
     auto at_cid = Cid::parse(at_cid_text);
@@ -113,6 +129,7 @@ int main() {
     if (!BSKY_TEST_CHECK(wrong_hash && !wrong_hash.value().is_atproto())) return 1;
     auto uppercase_base32 = Cid::parse("B" + at_cid_text.substr(1));
     if (!BSKY_TEST_CHECK(uppercase_base32 && uppercase_base32.value().to_string() == at_cid_text)) return 1;
+    if (!BSKY_TEST_CHECK(!Cid::parse(at_cid_text + "a"))) return 1;
     if (!BSKY_TEST_CHECK(!Cid::parse("bafyreia"))) return 1;
     if (!BSKY_TEST_CHECK(!Cid::parse("b!invalid"))) return 1;
     if (!BSKY_TEST_CHECK(!Cid::parse("b" + base32({1U, 0x71U, 0x12U, 0x80U})))) return 1;
