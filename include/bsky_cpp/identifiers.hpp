@@ -69,7 +69,7 @@ private:
     std::string m_canonical;
 };
 
-/// A case-sensitive record key with validated percent escapes.
+/// A case-sensitive record key using the AT Protocol restricted character set.
 class RecordKey {
 public:
     static Result<RecordKey> parse(std::string value);
@@ -156,7 +156,7 @@ private:
     std::size_t m_digest_size;
 };
 
-/// A validated record URI/CID pair identifying one record version.
+/// A validated record URI/record-CID pair identifying one record version.
 class StrongRef {
 public:
     static Result<StrongRef> create(AtUri uri, Cid cid);

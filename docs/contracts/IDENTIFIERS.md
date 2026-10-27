@@ -49,14 +49,18 @@ acceptance data; CID and StrongRef semantics have additional focused tests.
   percent escapes; handle authorities may not. Userinfo, trailing/extra path
   segments, malformed percent escapes, non-ASCII components, and empty
   query/fragment components are rejected. The defensive URI limit is 8192
-  bytes.
+  bytes. Fragment validation percent-decodes a temporary copy, validates UTF-8
+  and RFC 6901 `~0`/`~1` escapes, and preserves the original encoded spelling
+  for serialization. The general fragment character policy follows the pinned
+  upstream syntax implementation, including bracket characters.
 - `Cid::parse()` structurally decodes CIDv0 and CIDv1 multibase forms. CIDv1
   varints and the multihash length are checked before canonicalizing to
   lowercase base32. `is_atproto_record()` recognizes CIDv1 + dag-cbor and
   `is_atproto_blob()` recognizes CIDv1 + raw; both require sha2-256 with a
   32-byte digest, and `is_atproto()` covers either form.
-- `StrongRef::create()` owns an AT URI/CID pair and requires a record URI and
-  an AT Protocol CID.
+- `StrongRef::create()` owns an AT URI/CID pair and requires a query/fragment-
+  free record URI and specifically a dag-cbor record CID; raw blob CIDs are not
+  valid StrongRef targets.
 
 All parsers return `Result<T>` with `ErrorCategory::InvalidArgument` on
 malformed input. DID, NSID, and record-key limits remain independently bounded;

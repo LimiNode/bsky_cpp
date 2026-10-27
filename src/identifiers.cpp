@@ -68,7 +68,89 @@ bool is_uri_subdelim(char character) noexcept {
     }
 }
 
-bool valid_uri_component(std::string_view value, bool fragment) noexcept {
+bool is_valid_utf8(std::string_view value) noexcept {
+    std::size_t index = 0U;
+    while (index < value.size()) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        if (first <= 0x7fU) {
+            ++index;
+            continue;
+        }
+
+        std::size_t continuation_count = 0U;
+        std::uint32_t code_point = 0U;
+        std::uint32_t minimum = 0U;
+        if (first >= 0xc2U && first <= 0xdfU) {
+            continuation_count = 1U;
+            code_point = first & 0x1fU;
+            minimum = 0x80U;
+        } else if (first >= 0xe0U && first <= 0xefU) {
+            continuation_count = 2U;
+            code_point = first & 0x0fU;
+            minimum = 0x800U;
+        } else if (first >= 0xf0U && first <= 0xf4U) {
+            continuation_count = 3U;
+            code_point = first & 0x07U;
+            minimum = 0x10000U;
+        } else {
+            return false;
+        }
+        if (continuation_count > value.size() - index - 1U) {
+            return false;
+        }
+        for (std::size_t offset = 1U; offset <= continuation_count; ++offset) {
+            const auto byte = static_cast<unsigned char>(value[index + offset]);
+            if ((byte & 0xc0U) != 0x80U) {
+                return false;
+            }
+            code_point = (code_point << 6U) | (byte & 0x3fU);
+        }
+        if (code_point < minimum || code_point > 0x10ffffU ||
+            (code_point >= 0xd800U && code_point <= 0xdfffU)) {
+            return false;
+        }
+        index += continuation_count + 1U;
+    }
+    return true;
+}
+
+std::optional<std::string> percent_decode(std::string_view value) {
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        if (value[index] != '%') {
+            decoded.push_back(value[index]);
+            continue;
+        }
+        if (!valid_percent(value, index)) {
+            return std::nullopt;
+        }
+        decoded.push_back(static_cast<char>((hex_value(value[index + 1U]) << 4) |
+                                            hex_value(value[index + 2U])));
+        index += 2U;
+    }
+    return decoded;
+}
+
+bool valid_json_pointer(std::string_view encoded) {
+    auto decoded = percent_decode(encoded);
+    if (!decoded.has_value() || !is_valid_utf8(*decoded) || decoded->empty() ||
+        decoded->front() != '/') {
+        return false;
+    }
+    for (std::size_t index = 0U; index < decoded->size(); ++index) {
+        if ((*decoded)[index] == '~') {
+            if (index + 1U >= decoded->size() ||
+                ((*decoded)[index + 1U] != '0' && (*decoded)[index + 1U] != '1')) {
+                return false;
+            }
+            ++index;
+        }
+    }
+    return true;
+}
+
+bool valid_uri_component(std::string_view value, bool fragment) {
     if (fragment && (value.empty() || value.front() != '/')) {
         return false;
     }
@@ -87,18 +169,11 @@ bool valid_uri_component(std::string_view value, bool fragment) noexcept {
         const char character = static_cast<char>(byte);
         if (!(is_uri_unreserved(character) || is_uri_subdelim(character) ||
               character == ':' || character == '@' || character == '/' ||
-              character == '?')) {
+              character == '?' || (fragment && (character == '[' || character == ']')))) {
             return false;
         }
-        if (fragment && character == '~') {
-            if (index + 1U >= value.size() ||
-                (value[index + 1U] != '0' && value[index + 1U] != '1')) {
-                return false;
-            }
-            ++index;
-        }
     }
-    return true;
+    return !fragment || valid_json_pointer(value);
 }
 
 bool valid_did_value(std::string_view value) noexcept {

@@ -101,6 +101,17 @@ int main() {
     if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com?x=\xF0\x9F\x92\xA9"))) return 1;
     if (!BSKY_TEST_CHECK(static_cast<bool>(AtUri::parse(
             "at://alice.example.com?x=%F0%9F%92%A9#/profile")))) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com#/%FF"))) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com#/%7E2"))) return 1;
+    auto encoded_fragment = AtUri::parse("at://alice.example.com#/%E2%82%AC");
+    if (!BSKY_TEST_CHECK(encoded_fragment &&
+                         encoded_fragment.value().fragment().value() == "/%E2%82%AC" &&
+                         encoded_fragment.value().to_string() ==
+                             "at://alice.example.com#/%E2%82%AC")) return 1;
+    if (!BSKY_TEST_CHECK(static_cast<bool>(
+            AtUri::parse("at://alice.example.com#/a~1b")))) return 1;
+    if (!BSKY_TEST_CHECK(static_cast<bool>(
+            AtUri::parse("at://alice.example.com#/[asfd]")))) return 1;
     auto web_authority = AtUri::parse(
         "at://did:web:localhost%3A3000/app.bsky.actor.profile/self");
     if (!BSKY_TEST_CHECK(web_authority && web_authority.value().is_did_based())) return 1;
