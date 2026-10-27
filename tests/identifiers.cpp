@@ -57,7 +57,9 @@ int main() {
     auto unsupported = Did::parse("did:example:abc_123");
     if (!BSKY_TEST_CHECK(unsupported && !unsupported.value().is_supported_method())) return 1;
     if (!BSKY_TEST_CHECK(check_error(Did::parse("did:PLc:value")))) return 1;
+    if (!BSKY_TEST_CHECK(check_error(Did::parse("did:m123:val")))) return 1;
     if (!BSKY_TEST_CHECK(check_error(Did::parse("did:plc:")))) return 1;
+    if (!BSKY_TEST_CHECK(check_error(Did::parse("did:method:val:")))) return 1;
     if (!BSKY_TEST_CHECK(check_error(Did::parse("did:plc:bad%2")))) return 1;
 
     auto handle = Handle::parse("Alice.Example.COM");
@@ -65,17 +67,19 @@ int main() {
     if (!BSKY_TEST_CHECK(!Handle::parse("@alice.example"))) return 1;
     if (!BSKY_TEST_CHECK(!Handle::parse("alice.-example"))) return 1;
     if (!BSKY_TEST_CHECK(!Handle::parse("alice.123"))) return 1;
+    if (!BSKY_TEST_CHECK(!Handle::parse("thing.0aa"))) return 1;
     if (!BSKY_TEST_CHECK(!Handle::parse("alice..example"))) return 1;
 
-    auto nsid = Nsid::parse("com.atproto.repo.create");
-    if (!BSKY_TEST_CHECK(nsid && nsid.value().to_string() == "com.atproto.repo.create")) return 1;
+    auto nsid = Nsid::parse("com.atproto.repo.createRecord");
+    if (!BSKY_TEST_CHECK(nsid && nsid.value().to_string() == "com.atproto.repo.createRecord")) return 1;
     if (!BSKY_TEST_CHECK(!Nsid::parse("com.atproto"))) return 1;
     if (!BSKY_TEST_CHECK(!Nsid::parse("com.atproto.bad_underscore"))) return 1;
 
-    auto key = RecordKey::parse("3jfc%41safe");
-    if (!BSKY_TEST_CHECK(key && key.value().to_string() == "3jfc%41safe")) return 1;
+    auto key = RecordKey::parse("3jfc-safe");
+    if (!BSKY_TEST_CHECK(key && key.value().to_string() == "3jfc-safe")) return 1;
     if (!BSKY_TEST_CHECK(!RecordKey::parse("bad%2fkey"))) return 1;
-    if (!BSKY_TEST_CHECK(!RecordKey::parse("../escape"))) return 1;
+    if (!BSKY_TEST_CHECK(!RecordKey::parse("."))) return 1;
+    if (!BSKY_TEST_CHECK(!RecordKey::parse(".."))) return 1;
 
     auto handle_uri = AtUri::parse("at://Alice.Example.COM/com.atproto.repo.create/3jfc");
     if (!BSKY_TEST_CHECK(handle_uri && handle_uri.value().is_handle_based() &&
@@ -85,9 +89,16 @@ int main() {
                              "at://alice.example.com/com.atproto.repo.create/3jfc")) return 1;
     auto did_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur/com.atproto.repo");
     if (!BSKY_TEST_CHECK(did_uri && did_uri.value().is_did_based() && !did_uri.value().is_record())) return 1;
+    auto authority_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur#profile");
+    if (!BSKY_TEST_CHECK(authority_uri && authority_uri.value().collection().empty() &&
+                         authority_uri.value().fragment().value() == "profile" &&
+                         authority_uri.value().to_string() ==
+                             "at://did:plc:z72i7hdynmk6r22z27s6tvur#profile")) return 1;
+    auto query_uri = AtUri::parse("at://did:plc:z72i7hdynmk6r22z27s6tvur?foo=bar");
+    if (!BSKY_TEST_CHECK(query_uri && query_uri.value().query().value() == "foo=bar")) return 1;
     if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com/com.atproto.repo/x/y"))) return 1;
     if (!BSKY_TEST_CHECK(!AtUri::parse("at://user:pass@alice.example.com/com.atproto.repo/x"))) return 1;
-    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com/com.atproto.repo/x?query"))) return 1;
+    if (!BSKY_TEST_CHECK(!AtUri::parse("at://alice.example.com/com.atproto.repo/x?"))) return 1;
 
     const std::string at_cid_text = cid_v1(0x71U);
     auto at_cid = Cid::parse(at_cid_text);
@@ -95,7 +106,9 @@ int main() {
                          at_cid.value().codec() == 0x71U && at_cid.value().is_atproto() &&
                          at_cid.value().to_string() == at_cid_text)) return 1;
     auto general_cid = Cid::parse(cid_v1(0x55U));
-    if (!BSKY_TEST_CHECK(general_cid && !general_cid.value().is_atproto())) return 1;
+    if (!BSKY_TEST_CHECK(general_cid && general_cid.value().is_atproto_blob() &&
+                         general_cid.value().is_atproto() &&
+                         !general_cid.value().is_atproto_record())) return 1;
     auto wrong_hash = Cid::parse(cid_v1(0x71U, 0x13U));
     if (!BSKY_TEST_CHECK(wrong_hash && !wrong_hash.value().is_atproto())) return 1;
     auto uppercase_base32 = Cid::parse("B" + at_cid_text.substr(1));
@@ -111,6 +124,9 @@ int main() {
     auto strong = StrongRef::create(handle_uri.value(), at_cid.value());
     if (!BSKY_TEST_CHECK(strong && strong.value().uri() == handle_uri.value())) return 1;
     if (!BSKY_TEST_CHECK(!StrongRef::create(did_uri.value(), at_cid.value()))) return 1;
+    auto query_record = AtUri::parse("at://alice.example.com/com.atproto.repo.create/3jfc?view=1");
+    if (!BSKY_TEST_CHECK(query_record &&
+                         !StrongRef::create(query_record.value(), at_cid.value()))) return 1;
     if (!BSKY_TEST_CHECK(!StrongRef::create(handle_uri.value(), general_cid.value()))) return 1;
     return 0;
 }

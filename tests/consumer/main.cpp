@@ -34,7 +34,10 @@ int main() {
         "at://alice.example.com/com.atproto.repo.create/3jfc");
     auto cid = bsky_cpp::Cid::parse(
         "bafyreiaaaebagbafaydqqcikbmga2dqpcaireeyuculbogazdinryhi6d4");
-    if (!did || !handle || !uri || !cid || !cid.value().is_atproto()) {
+    auto blob_cid = bsky_cpp::Cid::parse(
+        "bafkreiaaaebagbafaydqqcikbmga2dqpcaireeyuculbogazdinryhi6d4");
+    if (!did || !handle || !uri || !cid || !cid.value().is_atproto_record() ||
+        !blob_cid || !blob_cid.value().is_atproto_blob()) {
         return 1;
     }
     auto strong_ref = bsky_cpp::StrongRef::create(uri.value(), cid.value());

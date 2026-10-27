@@ -17,6 +17,7 @@ constexpr std::size_t kMaxRecordKeyLength = 512U;
 constexpr std::size_t kMaxAtUriLength = 2048U;
 constexpr std::size_t kMaxCidLength = 256U;
 constexpr std::uint64_t kDagCborCodec = 0x71U;
+constexpr std::uint64_t kRawCodec = 0x55U;
 constexpr std::uint64_t kSha256Multihash = 0x12U;
 
 Error invalid(std::string operation, std::string message) {
@@ -37,13 +38,6 @@ bool is_hex(char character) noexcept {
            (character >= 'A' && character <= 'F');
 }
 
-char uppercase_hex(char character) noexcept {
-    if (character >= 'a' && character <= 'f') {
-        return static_cast<char>(character - 'a' + 'A');
-    }
-    return character;
-}
-
 int hex_value(char character) noexcept {
     if (character >= '0' && character <= '9') {
         return character - '0';
@@ -57,33 +51,6 @@ int hex_value(char character) noexcept {
 bool valid_percent(std::string_view value, std::size_t index) noexcept {
     return index + 2U < value.size() && value[index] == '%' &&
            is_hex(value[index + 1U]) && is_hex(value[index + 2U]);
-}
-
-std::string normalize_percent(std::string_view value, bool reject_path_controls) {
-    std::string result;
-    result.reserve(value.size());
-    for (std::size_t index = 0U; index < value.size(); ++index) {
-        const char character = value[index];
-        if (character != '%') {
-            result.push_back(character);
-            continue;
-        }
-        if (!valid_percent(value, index)) {
-            return {};
-        }
-        const int decoded = (hex_value(value[index + 1U]) << 4) |
-                            hex_value(value[index + 2U]);
-        if (reject_path_controls &&
-            (decoded == '/' || decoded == '\\' || decoded == '?' || decoded == '#' ||
-             decoded == '.')) {
-            return {};
-        }
-        result.push_back('%');
-        result.push_back(uppercase_hex(value[index + 1U]));
-        result.push_back(uppercase_hex(value[index + 2U]));
-        index += 2U;
-    }
-    return result;
 }
 
 bool valid_did_value(std::string_view value) noexcept {
@@ -370,13 +337,12 @@ Result<Did> Did::parse(std::string value) {
     }
     const std::string method = value.substr(4U, method_end - 4U);
     for (const char character : method) {
-        if (!(character >= 'a' && character <= 'z') && !is_digit(character) &&
-            character != '.') {
+        if (!(character >= 'a' && character <= 'z')) {
             return Result<Did>::failure(invalid("did.parse", "invalid DID method"));
         }
     }
     const std::string method_value = value.substr(method_end + 1U);
-    if (!valid_did_value(method_value)) {
+    if (value.back() == ':' || value.back() == '%' || !valid_did_value(method_value)) {
         return Result<Did>::failure(invalid("did.parse", "invalid DID method-specific id"));
     }
     const bool supported = method == "plc" || method == "web";
@@ -408,7 +374,8 @@ Result<Handle> Handle::parse(std::string value) {
         }
     }
     const std::string_view suffix = labels.back();
-    if (std::all_of(suffix.begin(), suffix.end(), is_digit)) {
+    if (std::all_of(suffix.begin(), suffix.end(), is_digit) ||
+        !is_alpha(suffix.front())) {
         return Result<Handle>::failure(invalid("handle.parse", "numeric final label"));
     }
     return Result<Handle>::success(Handle(std::move(canonical)));
@@ -422,9 +389,20 @@ Result<Nsid> Nsid::parse(std::string value) {
     if (labels.size() < 3U) {
         return Result<Nsid>::failure(invalid("nsid.parse", "NSID requires at least three parts"));
     }
-    for (const auto label : labels) {
-        if (!valid_dns_label(label, false)) {
+    if (labels.front().empty() || !is_alpha(labels.front().front())) {
+        return Result<Nsid>::failure(invalid("nsid.parse", "NSID authority must start with a letter"));
+    }
+    for (std::size_t index = 0U; index < labels.size(); ++index) {
+        const auto label = labels[index];
+        if (!valid_dns_label(label, true)) {
             return Result<Nsid>::failure(invalid("nsid.parse", "invalid NSID part"));
+        }
+        if (index + 1U == labels.size() &&
+            (!is_alpha(label.front()) ||
+             std::any_of(label.begin(), label.end(), [](char character) {
+                 return !(is_alpha(character) || is_digit(character));
+             }))) {
+            return Result<Nsid>::failure(invalid("nsid.parse", "invalid NSID name"));
         }
     }
     return Result<Nsid>::success(Nsid(std::move(value)));
@@ -440,56 +418,91 @@ Result<RecordKey> RecordKey::parse(std::string value) {
             character == '-' || character == '_' || character == '~' || character == ':') {
             continue;
         }
-        if (character != '%') {
-            return Result<RecordKey>::failure(invalid("record_key.parse", "invalid record key character"));
-        }
+        return Result<RecordKey>::failure(invalid("record_key.parse", "invalid record key character"));
     }
-    const std::string canonical = normalize_percent(value, true);
-    if (canonical.empty()) {
-        return Result<RecordKey>::failure(invalid("record_key.parse", "invalid record key escape"));
+    if (value == "." || value == "..") {
+        return Result<RecordKey>::failure(invalid("record_key.parse", "dot record keys are not allowed"));
     }
-    return Result<RecordKey>::success(RecordKey(canonical));
+    return Result<RecordKey>::success(RecordKey(std::move(value)));
 }
 
 AtUri::AtUri(std::string canonical, std::string authority, std::string collection,
-             std::optional<std::string> record_key, bool did_based)
+             std::optional<std::string> record_key, std::optional<std::string> query,
+             std::optional<std::string> fragment, bool did_based)
     : m_canonical(std::move(canonical)),
       m_authority(std::move(authority)),
       m_collection(std::move(collection)),
       m_record_key(std::move(record_key)),
+      m_query(std::move(query)),
+      m_fragment(std::move(fragment)),
       m_did_based(did_based) {}
 
 Result<AtUri> AtUri::parse(std::string value) {
-    if (value.size() > kMaxAtUriLength || value.rfind("at://", 0U) != 0U ||
-        value.find('?') != std::string::npos || value.find('#') != std::string::npos) {
+    if (value.size() > kMaxAtUriLength || value.rfind("at://", 0U) != 0U) {
         return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI prefix or delimiters"));
     }
-    const std::size_t authority_end = value.find('/', 5U);
-    if (authority_end == std::string::npos || authority_end == 5U) {
-        return Result<AtUri>::failure(invalid("aturi.parse", "AT URI requires authority and collection"));
+
+    const std::size_t fragment_pos = value.find('#', 5U);
+    const std::size_t query_pos = value.find('?', 5U);
+    if (query_pos != std::string::npos && fragment_pos != std::string::npos &&
+        query_pos > fragment_pos) {
+        return Result<AtUri>::failure(invalid("aturi.parse", "query must precede fragment"));
     }
-    const std::string raw_authority = value.substr(5U, authority_end - 5U);
+    const std::size_t path_end = std::min(
+        query_pos == std::string::npos ? value.size() : query_pos,
+        fragment_pos == std::string::npos ? value.size() : fragment_pos);
+    const std::size_t authority_end = value.find('/', 5U);
+    const bool has_path = authority_end != std::string::npos && authority_end <= path_end;
+    const std::size_t authority_limit = has_path ? authority_end : path_end;
+    if (authority_limit == 5U) {
+        return Result<AtUri>::failure(invalid("aturi.parse", "AT URI requires authority"));
+    }
+    const std::string raw_authority = value.substr(5U, authority_limit - 5U);
     if (raw_authority.find('@') != std::string::npos || raw_authority.find('%') != std::string::npos) {
         return Result<AtUri>::failure(invalid("aturi.parse", "userinfo and escaped authority are not allowed"));
     }
-    const std::string path = value.substr(authority_end + 1U);
-    const std::size_t collection_end = path.find('/');
-    const std::string raw_collection = path.substr(0U, collection_end);
-    if (raw_collection.empty() ||
-        (collection_end != std::string::npos && path.find('/', collection_end + 1U) != std::string::npos)) {
-        return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI path"));
-    }
-    auto collection = Nsid::parse(raw_collection);
-    if (!collection) {
-        return Result<AtUri>::failure(std::move(collection.error()));
-    }
+
+    std::string collection_string;
     std::optional<std::string> record_key;
-    if (collection_end != std::string::npos) {
-        auto parsed_key = RecordKey::parse(path.substr(collection_end + 1U));
-        if (!parsed_key) {
-            return Result<AtUri>::failure(std::move(parsed_key.error()));
+    if (has_path) {
+        const std::string path = value.substr(authority_end + 1U, path_end - authority_end - 1U);
+        if (path.empty() || path.back() == '/') {
+            return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI path"));
         }
-        record_key = parsed_key.value().to_string();
+        const std::size_t collection_end = path.find('/');
+        const std::string raw_collection = path.substr(0U, collection_end);
+        auto collection = Nsid::parse(raw_collection);
+        if (!collection) {
+            return Result<AtUri>::failure(std::move(collection.error()));
+        }
+        collection_string = collection.value().to_string();
+        if (collection_end != std::string::npos) {
+            if (path.find('/', collection_end + 1U) != std::string::npos) {
+                return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI path"));
+            }
+            auto parsed_key = RecordKey::parse(path.substr(collection_end + 1U));
+            if (!parsed_key) {
+                return Result<AtUri>::failure(std::move(parsed_key.error()));
+            }
+            record_key = parsed_key.value().to_string();
+        }
+    }
+
+    std::optional<std::string> query;
+    if (query_pos != std::string::npos) {
+        const std::size_t query_end = fragment_pos == std::string::npos ? value.size() : fragment_pos;
+        if (query_pos + 1U == query_end || value.substr(query_pos + 1U, query_end - query_pos - 1U).find_first_of(" \t\r\n") != std::string::npos) {
+            return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI query"));
+        }
+        query = value.substr(query_pos + 1U, query_end - query_pos - 1U);
+    }
+    std::optional<std::string> fragment;
+    if (fragment_pos != std::string::npos) {
+        if (fragment_pos + 1U == value.size() ||
+            value.substr(fragment_pos + 1U).find_first_of(" \t\r\n#") != std::string::npos) {
+            return Result<AtUri>::failure(invalid("aturi.parse", "invalid AT URI fragment"));
+        }
+        fragment = value.substr(fragment_pos + 1U);
     }
 
     bool did_based = false;
@@ -508,13 +521,22 @@ Result<AtUri> AtUri::parse(std::string value) {
         }
         authority = handle.value().to_string();
     }
-    std::string canonical = "at://" + authority + "/" + collection.value().to_string();
+    std::string canonical = "at://" + authority;
+    if (!collection_string.empty()) {
+        canonical += "/" + collection_string;
+    }
     if (record_key.has_value()) {
         canonical += "/" + *record_key;
     }
+    if (query.has_value()) {
+        canonical += "?" + *query;
+    }
+    if (fragment.has_value()) {
+        canonical += "#" + *fragment;
+    }
     return Result<AtUri>::success(AtUri(std::move(canonical), std::move(authority),
-                                        collection.value().to_string(), std::move(record_key),
-                                        did_based));
+                                        std::move(collection_string), std::move(record_key),
+                                        std::move(query), std::move(fragment), did_based));
 }
 
 Cid::Cid(std::string canonical, std::vector<std::uint8_t> bytes, std::uint64_t version,
@@ -566,17 +588,26 @@ Result<Cid> Cid::parse(std::string value) {
                                     parsed->digest_size));
 }
 
-bool Cid::is_atproto() const noexcept {
+bool Cid::is_atproto_record() const noexcept {
     return m_version == 1U && m_codec == kDagCborCodec &&
            m_multihash_code == kSha256Multihash && m_digest_size == 32U;
 }
 
+bool Cid::is_atproto_blob() const noexcept {
+    return m_version == 1U && m_codec == kRawCodec &&
+           m_multihash_code == kSha256Multihash && m_digest_size == 32U;
+}
+
+bool Cid::is_atproto() const noexcept {
+    return is_atproto_record() || is_atproto_blob();
+}
+
 Result<StrongRef> StrongRef::create(AtUri uri, Cid cid) {
-    if (!uri.is_record()) {
+    if (!uri.is_record() || uri.query().has_value() || uri.fragment().has_value()) {
         return Result<StrongRef>::failure(
-            invalid("strong_ref.create", "StrongRef requires a record AT URI"));
+            invalid("strong_ref.create", "StrongRef requires a query-free record AT URI"));
     }
-    if (!cid.is_atproto()) {
+    if (!cid.is_atproto_record()) {
         return Result<StrongRef>::failure(
             invalid("strong_ref.create", "StrongRef requires an AT Protocol CID"));
     }

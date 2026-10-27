@@ -67,8 +67,9 @@ invariant or contract from an earlier one.
   validation decodes multibase/varint/multihash structure; AT Protocol CID and
   StrongRef restrictions are explicit in
   [`IDENTIFIERS.md`](contracts/IDENTIFIERS.md).
-- **Testing:** unit tests cover positive/negative protocol cases, install/export
-  consumer use, Debug/Release builds, and sanitizer builds.
+- **Testing:** pinned upstream syntax fixtures cover 335 valid/invalid DID,
+  Handle, NSID, record-key, and AT URI cases; focused CID/StrongRef tests,
+  install/export consumer use, Debug/Release builds, and sanitizer builds.
 - **Deferred:** DID/handle resolution, transport, XRPC, persistence, and
   authenticated operations.
 

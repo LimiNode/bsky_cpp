@@ -82,7 +82,9 @@ private:
     std::string m_canonical;
 };
 
-/// A parsed at:// URI. A URI may be DID- or handle-authorized.
+/// A parsed at:// URI. A URI may be DID- or handle-authorized and may omit
+/// the collection when it identifies an authority origin. Query and fragment
+/// components are preserved verbatim.
 class AtUri {
 public:
     static Result<AtUri> parse(std::string value);
@@ -90,6 +92,8 @@ public:
     const std::string& authority() const noexcept { return m_authority; }
     const std::string& collection() const noexcept { return m_collection; }
     const std::optional<std::string>& record_key() const noexcept { return m_record_key; }
+    const std::optional<std::string>& query() const noexcept { return m_query; }
+    const std::optional<std::string>& fragment() const noexcept { return m_fragment; }
     const std::string& to_string() const noexcept { return m_canonical; }
     bool is_record() const noexcept { return m_record_key.has_value(); }
     bool is_did_based() const noexcept { return m_did_based; }
@@ -104,17 +108,21 @@ public:
 
 private:
     AtUri(std::string canonical, std::string authority, std::string collection,
-          std::optional<std::string> record_key, bool did_based);
+          std::optional<std::string> record_key, std::optional<std::string> query,
+          std::optional<std::string> fragment, bool did_based);
 
     std::string m_canonical;
     std::string m_authority;
     std::string m_collection;
     std::optional<std::string> m_record_key;
+    std::optional<std::string> m_query;
+    std::optional<std::string> m_fragment;
     bool m_did_based;
 };
 
 /// A structurally decoded CID. Parsing accepts general CIDv1 and CIDv0 forms;
-/// is_atproto() identifies the CIDv1/dag-cbor/sha2-256 form used by records.
+/// is_atproto_record() identifies dag-cbor record CIDs and is_atproto_blob()
+/// identifies raw blob CIDs. is_atproto() accepts either AT Protocol form.
 class Cid {
 public:
     static Result<Cid> parse(std::string value);
@@ -123,6 +131,8 @@ public:
     std::uint64_t codec() const noexcept { return m_codec; }
     std::uint64_t multihash_code() const noexcept { return m_multihash_code; }
     std::size_t digest_size() const noexcept { return m_digest_size; }
+    bool is_atproto_record() const noexcept;
+    bool is_atproto_blob() const noexcept;
     bool is_atproto() const noexcept;
     const std::string& to_string() const noexcept { return m_canonical; }
     const std::vector<std::uint8_t>& bytes() const noexcept { return m_bytes; }
