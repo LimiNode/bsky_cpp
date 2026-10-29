@@ -43,3 +43,12 @@ into a destroyed request/response buffer.
 
 The layer is independent of concrete HTTP/WebSocket libraries. Generated
 Lexicon code is a future build artifact, not part of D0.
+
+## M1b transport seam
+
+M1b exposes owned `TransportRequest` and `TransportResponse` values, a
+transport-neutral synchronous `Transport` interface, and a deterministic
+`FakeTransport` for tests. Requests accept only absolute HTTP(S) URLs, reject
+credential-bearing authorities and header control characters, and own their
+body bytes. Cancellation is observed before adapter dispatch. Async admission,
+executor ownership, and callback delivery remain M1c responsibilities.

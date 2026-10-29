@@ -20,6 +20,7 @@ set(BSKY_PUBLIC_HEADERS
     src/bsky_cpp/error.hpp
     src/bsky_cpp/identifiers.hpp
     src/bsky_cpp/result.hpp
+    src/bsky_cpp/transport.hpp
     src/bsky_cpp/version.hpp
 )
 
@@ -27,6 +28,7 @@ add_library(bsky_cpp STATIC
     src/bsky_cpp/cancellation.cpp
     src/bsky_cpp/error.cpp
     src/bsky_cpp/identifiers.cpp
+    src/bsky_cpp/transport.cpp
     src/bsky_cpp/version.cpp
 )
 add_library(bsky_cpp::bsky_cpp ALIAS bsky_cpp)
