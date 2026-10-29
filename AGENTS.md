@@ -35,7 +35,13 @@ surface. Open questions must remain explicitly marked as open questions.
 
 - Colocate library `.hpp` and `.cpp` files under `src/bsky_cpp/`.
 - Keep generated build, install, and external-consumer trees under `build/`.
-- Put approved managed dependencies in flat `external/<dependency>/` submodules.
+- Put approved managed dependencies in flat, direct Git submodules at
+  `external/<dependency>/`; pin each gitlink to a reviewed commit SHA.
+- Do not initialize submodules recursively by default. Nested/transitive
+  submodules require a documented technical exception, and compatible shared
+  dependencies should be reused rather than duplicated.
+- The core must configure, build, and test without initialized optional
+  dependencies.
 - Keep the core target independent of optional transport, event, and persistence
   integrations.
 
@@ -51,3 +57,14 @@ surface. Open questions must remain explicitly marked as open questions.
 5. Run `git diff --check` and link-check or grep checks before review.
 
 See `docs/guides/coding-agent-workflow.md` for the complete Definition of Done.
+
+Canonical local build commands use generated trees under `build/`:
+
+```text
+cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON
+cmake --build build/debug --parallel
+ctest --test-dir build/debug --output-on-failure
+```
+
+Use `build/release`, `build/consumer`, and `build/sanitized` for the analogous
+Release, installed-consumer, and sanitizer outputs.

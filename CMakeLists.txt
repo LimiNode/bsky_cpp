@@ -14,6 +14,14 @@ option(BSKY_BUILD_TESTS "Build bsky_cpp tests" ${BUILD_TESTING})
 option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
 
+set(BSKY_PUBLIC_HEADERS
+    src/bsky_cpp/cancellation.hpp
+    src/bsky_cpp/error.hpp
+    src/bsky_cpp/identifiers.hpp
+    src/bsky_cpp/result.hpp
+    src/bsky_cpp/version.hpp
+)
+
 add_library(bsky_cpp STATIC
     src/bsky_cpp/cancellation.cpp
     src/bsky_cpp/error.cpp
@@ -66,9 +74,8 @@ install(TARGETS bsky_cpp
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(DIRECTORY src/bsky_cpp/
+install(FILES ${BSKY_PUBLIC_HEADERS}
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/bsky_cpp
-    FILES_MATCHING PATTERN "*.hpp"
 )
 
 write_basic_package_version_file(

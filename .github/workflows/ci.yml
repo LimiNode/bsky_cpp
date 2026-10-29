@@ -29,6 +29,8 @@ jobs:
         run: ctest --test-dir build/ci --build-config ${{ matrix.build_type }} --output-on-failure
       - name: Documentation links
         run: python tools/check_markdown_links.py
+      - name: Documentation link checker tests
+        run: python tools/test_check_markdown_links.py
       - name: Install
         run: cmake --install build/ci --config ${{ matrix.build_type }} --prefix "${{ github.workspace }}/build/install"
       - name: Consumer configure
