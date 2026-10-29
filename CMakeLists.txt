@@ -14,6 +14,7 @@ option(BSKY_BUILD_TESTS "Build bsky_cpp tests" ${BUILD_TESTING})
 option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
 
+# Explicit install surface; add public .ipp/.tpp fragments here when needed.
 set(BSKY_PUBLIC_HEADERS
     src/bsky_cpp/cancellation.hpp
     src/bsky_cpp/error.hpp
