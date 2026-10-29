@@ -38,7 +38,7 @@
 *.out
 *.app
 
-# Build directories
+# All generated build, install, and consumer trees belong under build/.
 build/
 Build/
 build-*/

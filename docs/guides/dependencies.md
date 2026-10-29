@@ -9,3 +9,7 @@ Adding a dependency requires an ADR or an update to the relevant ADR, a reason
 it cannot remain optional, license/security review, a C++17 compatibility check,
 and a removal or replacement plan. Generated Lexicons are build inputs, not a
 reason to leak generator/runtime types into DTOs.
+
+When a managed dependency is approved, add it as a flat submodule under
+`external/<dependency>/`. Do not nest dependency checkouts or make the core
+target depend on optional integrations.

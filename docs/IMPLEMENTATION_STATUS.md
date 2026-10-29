@@ -14,7 +14,7 @@ A document, example, or roadmap item is not evidence of an implementation.
   diagnostic metadata, and cooperative cancellation with race-focused tests.
 - M1a identifier primitives: strict `Did`, `Handle`, `Nsid`, `RecordKey`,
   `AtUri`, structural `Cid`, and `StrongRef` parsing in
-  [`identifiers.hpp`](../include/bsky_cpp/identifiers.hpp), with unit and
+  [`identifiers.hpp`](../src/bsky_cpp/identifiers.hpp), with unit and
   installed-consumer coverage.
 
 ## Partial

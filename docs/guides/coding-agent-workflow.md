@@ -12,3 +12,8 @@
    dependency changes, and claims unsupported by evidence.
 8. Report exact HEAD SHA, files, checks, unresolved questions, and the next
    dependency-gated milestone. Draft PRs remain draft until independent review.
+
+Repository layout policy: source and public headers live together under
+`src/bsky_cpp/`; generated build, install, and external-consumer trees belong
+under `build/`; approved managed dependencies use flat `external/<dependency>/`
+submodules.

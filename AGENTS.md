@@ -31,6 +31,14 @@ surface. Open questions must remain explicitly marked as open questions.
 - Preserve UTF-8 byte offsets, Unicode code-point counts, and grapheme counts as
   distinct concepts.
 
+## Repository layout and dependencies
+
+- Colocate library `.hpp` and `.cpp` files under `src/bsky_cpp/`.
+- Keep generated build, install, and external-consumer trees under `build/`.
+- Put approved managed dependencies in flat `external/<dependency>/` submodules.
+- Keep the core target independent of optional transport, event, and persistence
+  integrations.
+
 ## Documentation and review workflow
 
 1. State the affected contract and lifecycle/concurrency implications.

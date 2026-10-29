@@ -15,17 +15,17 @@ option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
 
 add_library(bsky_cpp STATIC
-    src/cancellation.cpp
-    src/error.cpp
-    src/identifiers.cpp
-    src/version.cpp
+    src/bsky_cpp/cancellation.cpp
+    src/bsky_cpp/error.cpp
+    src/bsky_cpp/identifiers.cpp
+    src/bsky_cpp/version.cpp
 )
 add_library(bsky_cpp::bsky_cpp ALIAS bsky_cpp)
 
 target_compile_features(bsky_cpp PUBLIC cxx_std_17)
 target_include_directories(bsky_cpp
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
@@ -66,7 +66,10 @@ install(TARGETS bsky_cpp
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY src/bsky_cpp/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/bsky_cpp
+    FILES_MATCHING PATTERN "*.hpp"
+)
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfigVersion.cmake"

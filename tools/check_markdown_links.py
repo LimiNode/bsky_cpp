@@ -9,12 +9,18 @@ from pathlib import Path
 
 
 LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)#\s]+)(?:#[^)]+)?\)")
+SKIP_DIRECTORIES = {".git", "build", "external"}
 
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     failures: list[str] = []
-    for document in root.rglob("*.md"):
+    documents = (
+        document
+        for document in root.rglob("*.md")
+        if not any(part in SKIP_DIRECTORIES for part in document.relative_to(root).parts)
+    )
+    for document in documents:
         text = document.read_text(encoding="utf-8")
         for match in LINK_PATTERN.finditer(text):
             link = match.group(1)
