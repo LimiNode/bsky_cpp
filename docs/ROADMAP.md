@@ -3,7 +3,7 @@
 Progress is dependency-gated. A later milestone cannot silently bypass an
 invariant or contract from an earlier one.
 
-## D0 — Architecture Foundation (current)
+## D0 — Architecture Foundation (complete)
 
 - **Scope:** documentation, contracts, governance, terminology, and ADR.
 - **Prerequisites:** repository baseline and current AT Protocol references.
@@ -25,7 +25,7 @@ invariant or contract from an earlier one.
 - **Testing:** compiler matrix, sanitizers, unit tests, and diff/link checks.
 - **Deferred:** real XRPC calls and generated Lexicons.
 
-### M0a — Project scaffold (current on the stacked M0a branch)
+### M0a — Project scaffold (complete)
 
 - **Scope:** C++17 CMake library target, public include layout, install/export,
   smoke test, CTest, documentation link check, and cross-platform CI.
@@ -33,7 +33,7 @@ invariant or contract from an earlier one.
   links `bsky_cpp::bsky_cpp` without optional dependencies.
 - **Deferred:** Result/Error/cancellation semantics and all network behavior.
 
-### M0b — Core primitives (current on the stacked M0b branch)
+### M0b — Core primitives (complete)
 
 - **Prerequisites:** M0a.
 - **Deliverables:** `Result<T>`, `Result<void>`, typed `Error`, diagnostic
@@ -56,6 +56,22 @@ invariant or contract from an earlier one.
   ready for deterministic fake transport/executor implementation.
 - **Deferred:** transport, XRPC, executor implementation, and callback
   machinery remain out of scope.
+
+### M1a — Identifier primitives (implemented)
+
+- **Prerequisites:** M0a/M0b primitives and the M0c contract.
+- **Deliverables:** strict `Did`, `Handle`, `Nsid`, `RecordKey`, `AtUri`, `Cid`,
+  and `StrongRef` value types with structural validation, canonical forms, and
+  public consumer coverage.
+- **Acceptance:** malformed identifiers are rejected with typed errors; CID
+  validation decodes multibase/varint/multihash structure; AT Protocol CID and
+  StrongRef restrictions are explicit in
+  [`IDENTIFIERS.md`](contracts/IDENTIFIERS.md).
+- **Testing:** pinned upstream syntax fixtures cover 335 valid/invalid DID,
+  Handle, NSID, record-key, and AT URI cases; focused CID/StrongRef tests,
+  install/export consumer use, Debug/Release builds, and sanitizer builds.
+- **Deferred:** DID/handle resolution, transport, XRPC, persistence, and
+  authenticated operations.
 
 ## M1 — AT Protocol Foundation
 
