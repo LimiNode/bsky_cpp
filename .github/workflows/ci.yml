@@ -22,21 +22,23 @@ jobs:
         with:
           python-version: '3.x'
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBSKY_BUILD_TESTS=ON
+        run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBSKY_BUILD_TESTS=ON
       - name: Build
-        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+        run: cmake --build build/ci --config ${{ matrix.build_type }} --parallel
       - name: Test
-        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure
+        run: ctest --test-dir build/ci --build-config ${{ matrix.build_type }} --output-on-failure
       - name: Documentation links
         run: python tools/check_markdown_links.py
+      - name: Documentation link checker tests
+        run: python tools/test_check_markdown_links.py
       - name: Install
-        run: cmake --install build --config ${{ matrix.build_type }} --prefix "${{ runner.temp }}/bsky_cpp-install"
+        run: cmake --install build/ci --config ${{ matrix.build_type }} --prefix "${{ github.workspace }}/build/install"
       - name: Consumer configure
-        run: cmake -S tests/consumer -B consumer-build -DCMAKE_PREFIX_PATH="${{ runner.temp }}/bsky_cpp-install" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        run: cmake -S tests/consumer -B build/consumer -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/install" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - name: Consumer build
-        run: cmake --build consumer-build --config ${{ matrix.build_type }} --parallel
+        run: cmake --build build/consumer --config ${{ matrix.build_type }} --parallel
       - name: Consumer test
-        run: ctest --test-dir consumer-build --build-config ${{ matrix.build_type }} --output-on-failure
+        run: ctest --test-dir build/consumer --build-config ${{ matrix.build_type }} --output-on-failure
 
   sanitizers:
     name: Ubuntu / sanitizers
@@ -44,8 +46,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON -DBSKY_ENABLE_SANITIZERS=ON
+        run: cmake -S . -B build/sanitized -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON -DBSKY_ENABLE_SANITIZERS=ON
       - name: Build
-        run: cmake --build build-sanitized --parallel
+        run: cmake --build build/sanitized --parallel
       - name: Test
-        run: ctest --test-dir build-sanitized --output-on-failure
+        run: ctest --test-dir build/sanitized --output-on-failure

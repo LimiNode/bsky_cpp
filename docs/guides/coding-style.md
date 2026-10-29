@@ -9,8 +9,9 @@
   default lambda captures.
 - Keep transport and persistence types behind interfaces. Public headers must
   compile without optional integrations.
-- Organize future sources as `include/bsky_cpp/` public headers, `src/` private
-  implementations, `tests/` test fixtures, and `examples/` opt-in examples.
+- Organize library sources under `src/bsky_cpp/`, colocating public `.hpp` and
+  implementation `.cpp` files. Keep `tests/` test fixtures and `examples/`
+  opt-in examples separate.
   Keep one primary type per file where practical.
 - Use `.hpp` for public C++ declarations, `.cpp` for compiled implementations,
   and `.ipp`/`.tpp` only for template implementation fragments included by the

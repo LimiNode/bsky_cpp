@@ -38,7 +38,7 @@
 *.out
 *.app
 
-# Build directories
+# All generated build, install, and consumer trees belong under build/.
 build/
 Build/
 build-*/
@@ -56,6 +56,10 @@ compile_commands.json
 *.log
 *.bak
 *.swp
+
+# Python tooling caches
+__pycache__/
+*.py[cod]
 
 # vcpkg
 vcpkg_installed/
