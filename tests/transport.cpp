@@ -18,10 +18,22 @@ using bsky_cpp::HttpMethod;
 using bsky_cpp::TransportRequest;
 using bsky_cpp::TransportResponse;
 
+bool same_headers(const std::vector<bsky_cpp::TransportHeader>& left,
+                  const std::vector<bsky_cpp::TransportHeader>& right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0U; index < left.size(); ++index) {
+        if (left[index].name != right[index].name || left[index].value != right[index].value) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int request_validation() {
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "not-a-url"))) return 1;
-    if (!BSKY_TEST_CHECK(!TransportRequest::create(static_cast<HttpMethod>(255U),
-                                                   "https://example.com"))) return 1;
+    const auto unknown_method = static_cast<HttpMethod>(255U);
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(unknown_method, "https://example.com"))) return 1;
+    if (!BSKY_TEST_CHECK(std::string(bsky_cpp::http_method_name(unknown_method)) == "UNKNOWN")) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://?query"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://example.com/path here"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://user:secret@example.com"))) return 1;
@@ -31,6 +43,7 @@ int request_validation() {
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[::1/path"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[:::]/"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://999.999.999.999/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://001.2.3.4/"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://example.com/%ZZ"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://example.com#fragment"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://example.com/path#fragment"))) return 1;
@@ -45,6 +58,13 @@ int request_validation() {
                              .has_value())) return 1;
     if (!BSKY_TEST_CHECK(TransportRequest::create(HttpMethod::Get, "https://[::1]:443/path")
                              .has_value())) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[gggg::1:2]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[1:::2]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[fe80::1%25]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[fe80::1%25bad:zone]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[::1]:/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://example.com/path\\name"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://example.com/path|name"))) return 1;
 
     auto request = TransportRequest::create(HttpMethod::Post, "https://pds.example/xrpc/com.example.echo");
     if (!BSKY_TEST_CHECK(request.has_value())) return 1;
@@ -75,6 +95,11 @@ int response_headers_and_limits() {
     if (!BSKY_TEST_CHECK(response.value().set_header("Set-Cookie", "c=3").has_value())) return 1;
     const std::vector<std::string> replaced_cookie{"c=3"};
     if (!BSKY_TEST_CHECK(response.value().headers("set-cookie") == replaced_cookie)) return 1;
+
+    const auto before_invalid = response.value().headers();
+    if (!BSKY_TEST_CHECK(!response.value().set_header("Bad Header", "value"))) return 1;
+    if (!BSKY_TEST_CHECK(same_headers(response.value().headers(), before_invalid))) return 1;
+
     if (!BSKY_TEST_CHECK(!TransportResponse::create(99U))) return 1;
     if (!BSKY_TEST_CHECK(!TransportResponse::create(600U))) return 1;
 
@@ -85,6 +110,22 @@ int response_headers_and_limits() {
                              index >= 127U)) return 1;
     }
     if (!BSKY_TEST_CHECK(!response.value().append_header("X-Overflow", "v"))) return 1;
+
+    const auto before_count_overflow = response.value().headers();
+    if (!BSKY_TEST_CHECK(!response.value().set_header("X-Another", "v"))) return 1;
+    if (!BSKY_TEST_CHECK(same_headers(response.value().headers(), before_count_overflow))) return 1;
+
+    auto byte_limited = TransportResponse::create(200U);
+    if (!BSKY_TEST_CHECK(byte_limited.has_value())) return 1;
+    const std::string large_value(16U * 1024U, 'y');
+    if (!BSKY_TEST_CHECK(byte_limited.value().set_header("A", large_value).has_value())) return 1;
+    if (!BSKY_TEST_CHECK(byte_limited.value().set_header("B", large_value).has_value())) return 1;
+    if (!BSKY_TEST_CHECK(byte_limited.value().set_header("C", large_value).has_value())) return 1;
+    const auto before_bytes_overflow = byte_limited.value().headers();
+    if (!BSKY_TEST_CHECK(!byte_limited.value().set_header("D", large_value))) return 1;
+    if (!BSKY_TEST_CHECK(same_headers(byte_limited.value().headers(), before_bytes_overflow))) {
+        return 1;
+    }
     return 0;
 }
 

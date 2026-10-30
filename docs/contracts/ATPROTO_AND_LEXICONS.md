@@ -61,10 +61,12 @@ handler exceptions as generic typed transport errors without copying exception
 text into diagnostics.
 
 The synchronous `Transport::send()` is an explicitly limited blocking seam,
-not the SDK's application-facing async API. M1c must invoke blocking
-implementations through a bounded worker bridge and keep event/callback threads
-non-blocking; a native-async adapter may be added behind the operation layer
-without changing request/response ownership. Async admission, executor
-ownership, shutdown, and callback delivery remain M1c responsibilities. Body
-size limits, streaming, and backpressure are owned by the concrete adapter and
-its M1c integration rather than by a global transport value limit.
+not the SDK's application-facing async API and not a required implementation
+path for native-async adapters. M1c must invoke blocking implementations through
+a bounded worker bridge and keep event/callback threads non-blocking. A future
+`kurlyk` adapter may deliver completion directly into the operation runtime,
+without `future.get()` and without a per-request waiter thread, while preserving
+request/response ownership. Async admission, executor ownership, shutdown, and
+callback delivery remain M1c responsibilities. Body size limits, streaming, and
+backpressure are owned by the concrete adapter and its M1c integration rather
+than by a global transport value limit.

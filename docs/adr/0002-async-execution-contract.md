@@ -82,10 +82,12 @@ queued callbacks through that policy or drain them under its documented rules.
 
 The M1b `Transport::send()` interface is deliberately a low-level synchronous
 seam for owned request/response values and deterministic fakes. It is not the
-application-facing async API and must not be called directly from an event or
+application-facing async API, nor is it a required implementation path for a
+native-async adapter, and it must not be called directly from an event or
 callback thread. M1c supplies the bounded-worker bridge for blocking
-implementations; a native-async adapter may integrate behind the same
-operation state machine without changing the public ownership contract.
+implementations. A future `kurlyk` adapter may deliver completion directly into
+the operation state machine without `future.get()` or a per-request waiter
+thread, while preserving the public ownership contract.
 
 Client destruction stops admission and initiates shutdown. Operation state and
 executor leases are shared independently of the `Client` object, so a

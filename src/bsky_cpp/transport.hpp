@@ -17,7 +17,7 @@ namespace bsky_cpp {
 /// HTTP method used by a transport request.
 enum class HttpMethod : std::uint8_t { Get, Post, Put, Patch, Delete };
 
-/// Returns the wire spelling of an HTTP method.
+/// Returns the wire spelling of an HTTP method, or `UNKNOWN` for an invalid enum.
 const char* http_method_name(HttpMethod method) noexcept;
 
 /// A bounded, owned HTTP header entry.
@@ -97,8 +97,11 @@ private:
 /// Implementations own their connection and buffering strategy. The request,
 /// response, and body values are owned and remain valid independently of any
 /// adapter buffers. This is a low-level blocking seam: M1c must invoke it from
-/// a bounded worker bridge and never from an event or callback thread. Native
-/// async adapter integration and operation admission remain M1c responsibilities.
+/// a bounded worker bridge and never from an event or callback thread. It is
+/// not a required implementation path for native-async adapters: a future
+/// `kurlyk` adapter may deliver completion directly into the operation runtime
+/// without `future.get()` or a per-request waiter thread. Native async adapter
+/// integration and operation admission remain M1c responsibilities.
 class Transport {
 public:
     virtual ~Transport() = default;

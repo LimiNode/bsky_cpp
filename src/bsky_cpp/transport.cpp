@@ -64,17 +64,18 @@ bool valid_header_name(std::string_view value) noexcept {
     return true;
 }
 
+bool is_hex_digit(unsigned char character) noexcept {
+    return (character >= '0' && character <= '9') ||
+           (character >= 'a' && character <= 'f') ||
+           (character >= 'A' && character <= 'F');
+}
+
 bool valid_percent_escapes(std::string_view value) noexcept {
-    constexpr auto is_hex = [](unsigned char character) noexcept {
-        return (character >= '0' && character <= '9') ||
-               (character >= 'a' && character <= 'f') ||
-               (character >= 'A' && character <= 'F');
-    };
     for (std::size_t index = 0U; index < value.size(); ++index) {
         const unsigned char character = static_cast<unsigned char>(value[index]);
         if (character == '%') {
-            if (index + 2U >= value.size() || !is_hex(value[index + 1U]) ||
-                !is_hex(value[index + 2U])) {
+            if (index + 2U >= value.size() || !is_hex_digit(value[index + 1U]) ||
+                !is_hex_digit(value[index + 2U])) {
                 return false;
             }
             index += 2U;
@@ -86,8 +87,43 @@ bool valid_percent_escapes(std::string_view value) noexcept {
     return true;
 }
 
+bool is_unreserved(unsigned char character) noexcept {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9') || character == '-' ||
+           character == '.' || character == '_' || character == '~';
+}
+
+bool is_sub_delim(unsigned char character) noexcept {
+    return character == '!' || character == '$' || character == '&' ||
+           character == '\'' || character == '(' || character == ')' ||
+           character == '*' || character == '+' || character == ',' ||
+           character == ';' || character == '=';
+}
+
+bool valid_uri_target(std::string_view target) noexcept {
+    bool query = false;
+    for (std::size_t index = 0U; index < target.size(); ++index) {
+        const unsigned char character = static_cast<unsigned char>(target[index]);
+        if (character == '%') {
+            index += 2U;
+            continue;
+        }
+        if (character == '?') {
+            query = true;
+            continue;
+        }
+        if (is_unreserved(character) || is_sub_delim(character) || character == ':' ||
+            character == '@' || character == '/' || (query && character == '?')) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 bool valid_dns_host(std::string_view host) noexcept {
-    if (host.empty() || host.front() == '.' || host.back() == '.') {
+    if (host.empty() || host.size() > 253U || host.front() == '.' || host.back() == '.') {
         return false;
     }
     bool all_numeric = true;
@@ -96,7 +132,8 @@ bool valid_dns_host(std::string_view host) noexcept {
     while (label_start < host.size()) {
         const std::size_t label_end = host.find('.', label_start);
         const std::size_t end = label_end == std::string_view::npos ? host.size() : label_end;
-        if (end == label_start || host[label_start] == '-' || host[end - 1U] == '-') {
+        if (end == label_start || end - label_start > 63U || host[label_start] == '-' ||
+            host[end - 1U] == '-') {
             return false;
         }
         for (std::size_t index = label_start; index < end; ++index) {
@@ -121,9 +158,17 @@ bool valid_dns_host(std::string_view host) noexcept {
         while (label_start < host.size()) {
             const std::size_t label_end = host.find('.', label_start);
             const std::size_t end = label_end == std::string_view::npos ? host.size() : label_end;
+            if (end - label_start > 3U ||
+                (end - label_start > 1U && host[label_start] == '0')) {
+                return false;
+            }
             unsigned int value = 0U;
             for (std::size_t index = label_start; index < end; ++index) {
-                value = value * 10U + static_cast<unsigned int>(host[index] - '0');
+                const unsigned int digit = static_cast<unsigned int>(host[index] - '0');
+                if (value > (255U - digit) / 10U) {
+                    return false;
+                }
+                value = value * 10U + digit;
             }
             if (value > 255U) {
                 return false;
@@ -144,8 +189,25 @@ bool valid_ipv6_literal(std::string_view host) noexcept {
         return false;
     }
     if (zone != std::string_view::npos &&
-        (zone + 3U > host.size() || host.substr(zone, 3U) != "%25")) {
+        (zone + 3U >= host.size() || host.substr(zone, 3U) != "%25")) {
         return false;
+    }
+    if (zone != std::string_view::npos) {
+        const std::string_view identifier = host.substr(zone + 3U);
+        for (std::size_t index = 0U; index < identifier.size(); ++index) {
+            const unsigned char character = static_cast<unsigned char>(identifier[index]);
+            if (character == '%') {
+                if (index + 2U >= identifier.size() || !is_hex_digit(identifier[index + 1U]) ||
+                    !is_hex_digit(identifier[index + 2U])) {
+                    return false;
+                }
+                index += 2U;
+                continue;
+            }
+            if (!is_unreserved(character)) {
+                return false;
+            }
+        }
     }
     const bool compressed = address.find("::") != std::string_view::npos;
     if (compressed && address.find("::", address.find("::") + 2U) !=
@@ -155,24 +217,24 @@ bool valid_ipv6_literal(std::string_view host) noexcept {
     const std::size_t compression = address.find("::");
     const std::string_view left = compressed ? address.substr(0U, compression) : address;
     const std::string_view right = compressed ? address.substr(compression + 2U) : "";
-    auto count_groups = [](std::string_view part) noexcept -> int {
+    auto count_groups = [](std::string_view part, int& groups) noexcept {
+        groups = 0;
         if (part.empty()) {
-            return 0;
+            return true;
         }
-        int groups = 0;
         std::size_t start = 0U;
         while (start < part.size()) {
             const std::size_t end = part.find(':', start);
             const std::size_t stop = end == std::string_view::npos ? part.size() : end;
             if (stop == start || stop - start > 4U) {
-                return -1;
+                return false;
             }
             for (std::size_t index = start; index < stop; ++index) {
                 const unsigned char character = static_cast<unsigned char>(part[index]);
                 if (!((character >= 'A' && character <= 'F') ||
                       (character >= 'a' && character <= 'f') ||
                       (character >= '0' && character <= '9'))) {
-                    return -1;
+                    return false;
                 }
             }
             ++groups;
@@ -181,14 +243,19 @@ bool valid_ipv6_literal(std::string_view host) noexcept {
             }
             start = end + 1U;
         }
-        return groups;
+        return true;
     };
-    const int groups = count_groups(left) + count_groups(right);
-    if (groups < 0 || (compressed ? groups >= 8 : groups != 8)) {
+    int left_groups = 0;
+    int right_groups = 0;
+    if (!count_groups(left, left_groups) || !count_groups(right, right_groups)) {
+        return false;
+    }
+    const int groups = left_groups + right_groups;
+    if (compressed ? groups >= 8 : groups != 8) {
         return false;
     }
     if (address.find(':') == std::string_view::npos) {
-            return false;
+        return false;
     }
     return host.find(':') != std::string_view::npos;
 }
@@ -267,7 +334,10 @@ bool valid_url(std::string_view value) noexcept {
             return false;
         }
     }
-    return true;
+    const std::size_t target_start = authority_end == std::string_view::npos
+                                         ? value.size()
+                                         : authority_end;
+    return valid_uri_target(value.substr(target_start));
 }
 
 std::size_t header_bytes(const std::vector<TransportHeader>& headers) noexcept {
@@ -305,17 +375,32 @@ Result<void> set_header_impl(std::vector<TransportHeader>& headers, std::string 
             invalid("invalid transport header", std::move(operation)));
     }
     const std::string canonical = lowercase(name);
-    std::vector<TransportHeader> replacement;
-    replacement.reserve(headers.size() + 1U);
-    for (TransportHeader& header : headers) {
-        if (header.name != canonical) {
-            replacement.push_back(std::move(header));
+    std::size_t retained_count = 0U;
+    std::size_t retained_bytes = 0U;
+    for (const TransportHeader& header : headers) {
+        if (header.name == canonical) {
+            continue;
         }
+        ++retained_count;
+        if (retained_bytes > std::numeric_limits<std::size_t>::max() -
+                                  header.name.size() - header.value.size()) {
+            return Result<void>::failure(
+                invalid("transport header limits exceeded", std::move(operation)));
+        }
+        retained_bytes += header.name.size() + header.value.size();
     }
-    if (replacement.size() >= kMaxHeaders ||
-        header_bytes(replacement) > kMaxHeaderBytes - canonical.size() - value.size()) {
+    if (retained_count >= kMaxHeaders ||
+        retained_bytes > kMaxHeaderBytes - canonical.size() - value.size()) {
         return Result<void>::failure(
             invalid("transport header limits exceeded", std::move(operation)));
+    }
+
+    std::vector<TransportHeader> replacement;
+    replacement.reserve(retained_count + 1U);
+    for (const TransportHeader& header : headers) {
+        if (header.name != canonical) {
+            replacement.push_back(header);
+        }
     }
     replacement.push_back(TransportHeader{canonical, std::move(value)});
     headers = std::move(replacement);
@@ -362,7 +447,7 @@ const char* http_method_name(HttpMethod method) noexcept {
         case HttpMethod::Delete:
             return "DELETE";
     }
-    return "GET";
+    return "UNKNOWN";
 }
 
 Result<TransportRequest> TransportRequest::create(HttpMethod method, std::string url) {
