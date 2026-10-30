@@ -66,4 +66,4 @@ jobs:
       - name: Configure documentation
         run: cmake -S . -B build/docs -DBSKY_BUILD_TESTS=OFF -DBSKY_BUILD_DOCUMENTATION=ON
       - name: Build documentation (warnings are errors)
-        run: cmake --build build/docs --target bsky_cpp_docs --parallel
+        run: timeout --foreground 5m cmake --build build/docs --target bsky_cpp_docs --parallel
