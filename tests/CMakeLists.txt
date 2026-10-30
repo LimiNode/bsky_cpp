@@ -37,3 +37,12 @@ bsky_cpp_enable_sanitizers(bsky_cpp_identifier_fixtures)
 
 add_test(NAME bsky_cpp.identifier_fixtures COMMAND bsky_cpp_identifier_fixtures)
 set_tests_properties(bsky_cpp.identifier_fixtures PROPERTIES TIMEOUT 10)
+
+add_executable(bsky_cpp_transport
+    transport.cpp
+)
+target_link_libraries(bsky_cpp_transport PRIVATE bsky_cpp::bsky_cpp)
+bsky_cpp_enable_sanitizers(bsky_cpp_transport)
+
+add_test(NAME bsky_cpp.transport COMMAND bsky_cpp_transport)
+set_tests_properties(bsky_cpp.transport PROPERTIES TIMEOUT 10)

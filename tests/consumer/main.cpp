@@ -2,6 +2,7 @@
 #include <bsky_cpp/error.hpp>
 #include <bsky_cpp/identifiers.hpp>
 #include <bsky_cpp/result.hpp>
+#include <bsky_cpp/transport.hpp>
 
 #include <string>
 
@@ -42,6 +43,12 @@ int main() {
     }
     auto strong_ref = bsky_cpp::StrongRef::create(uri.value(), cid.value());
     if (!strong_ref) {
+        return 1;
+    }
+    auto request = bsky_cpp::TransportRequest::create(
+        bsky_cpp::HttpMethod::Get, "https://example.com/health");
+    auto response = bsky_cpp::TransportResponse::create(204U);
+    if (!request || !response) {
         return 1;
     }
     return 0;

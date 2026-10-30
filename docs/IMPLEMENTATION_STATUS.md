@@ -16,12 +16,15 @@ A document, example, or roadmap item is not evidence of an implementation.
   `AtUri`, structural `Cid`, and `StrongRef` parsing in
   [`identifiers.hpp`](../src/bsky_cpp/identifiers.hpp), with unit and
   installed-consumer coverage.
+- M1b transport seam: owned typed request/response values, the transport
+  interface, and deterministic cancellation-aware `FakeTransport` in
+  [`transport.hpp`](../src/bsky_cpp/transport.hpp), with unit coverage.
 
 ## Partial
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c is an accepted
-  documentation-only async contract. Async executor, callback, and network
-  machinery remain deferred.
+  documentation-only async contract. M1c async executor, callback, and
+  operation machinery remain deferred.
 
 ## Contract-only
 
@@ -37,7 +40,7 @@ A document, example, or roadmap item is not evidence of an implementation.
 
 ## Planned
 
-- M1b and later protocol/transport work through M5 as described in
+- M1c and later protocol/transport work through M5 as described in
   [`ROADMAP.md`](ROADMAP.md).
 
 ## Deferred

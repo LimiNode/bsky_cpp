@@ -73,6 +73,20 @@ invariant or contract from an earlier one.
 - **Deferred:** DID/handle resolution, transport, XRPC, persistence, and
   authenticated operations.
 
+### M1b — Transport abstraction (implemented)
+
+- **Prerequisites:** M1a and the M1 transport-neutral boundary.
+- **Deliverables:** owned typed transport request/response values, a synchronous
+  transport interface, header/body validation, cancellation observation, and a
+  deterministic fake transport.
+- **Acceptance:** no concrete HTTP dependency in the core; malformed URLs and
+  headers are rejected; request/response bodies own their bytes; cancelled
+  requests do not dispatch; installed consumers retain the public API.
+- **Testing:** Debug/Release CTest, cancellation and header validation tests,
+  install/export consumer, and sanitizer CI.
+- **Deferred:** async operation admission/execution (M1c), XRPC encoding and
+  protocol mapping (M1d), identity resolution, and network adapters.
+
 ## M1 — AT Protocol Foundation
 
 - **Prerequisites:** M0c; current XRPC/Lexicon specifications pinned for
