@@ -183,6 +183,9 @@ bool valid_dns_host(std::string_view host) noexcept {
 }
 
 bool valid_ipv4_literal(std::string_view value) noexcept {
+    if (value.empty() || value.back() == '.') {
+        return false;
+    }
     std::size_t start = 0U;
     std::size_t components = 0U;
     while (start < value.size()) {

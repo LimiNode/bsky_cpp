@@ -65,6 +65,12 @@ int request_validation() {
     if (!BSKY_TEST_CHECK(TransportRequest::create(HttpMethod::Get, "https://[::ffff:192.0.2.128]/")
                              .has_value())) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get,
+                                                    "https://[::ffff:192.0.2.128.]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get,
+                                                    "https://[::192.0.2.128.]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get,
+                                                    "https://[::ffff:256.0.0.1]/"))) return 1;
+    if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get,
                                                     "https://[1:2:3:4:5:6:7:8:]/"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[1::2:]/"))) return 1;
     if (!BSKY_TEST_CHECK(!TransportRequest::create(HttpMethod::Get, "https://[gggg::1:2]/"))) return 1;
