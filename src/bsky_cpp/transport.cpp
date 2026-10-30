@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <exception>
+#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -15,6 +17,11 @@ Error invalid(std::string message, std::string operation) {
 Error transport_error(std::string message) {
     return Error(ErrorCategory::Transport, std::move(message), "transport.send");
 }
+
+constexpr std::size_t kMaxHeaders = 128U;
+constexpr std::size_t kMaxHeaderNameBytes = 256U;
+constexpr std::size_t kMaxHeaderValueBytes = 16U * 1024U;
+constexpr std::size_t kMaxHeaderBytes = 64U * 1024U;
 
 std::string lowercase(std::string_view value) {
     std::string result;
@@ -34,22 +41,170 @@ bool has_control(std::string_view value) noexcept {
     return false;
 }
 
+bool is_token_character(unsigned char character) noexcept {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9') || character == '!' ||
+           character == '#' || character == '$' || character == '%' ||
+           character == '&' || character == '\'' || character == '*' ||
+           character == '+' || character == '-' || character == '.' ||
+           character == '^' || character == '_' || character == '`' ||
+           character == '|' || character == '~';
+}
+
 bool valid_header_name(std::string_view value) noexcept {
-    if (value.empty()) {
+    if (value.empty() || value.size() > kMaxHeaderNameBytes) {
         return false;
     }
     for (const unsigned char character : value) {
-        const bool token = std::isalnum(character) != 0 || character == '!' ||
-                           character == '#' || character == '$' || character == '%' ||
-                           character == '&' || character == '\'' || character == '*' ||
-                           character == '+' || character == '-' || character == '.' ||
-                           character == '^' || character == '_' || character == '`' ||
-                           character == '|' || character == '~';
-        if (!token) {
+        if (!is_token_character(character)) {
             return false;
         }
     }
     return true;
+}
+
+bool valid_percent_escapes(std::string_view value) noexcept {
+    constexpr auto is_hex = [](unsigned char character) noexcept {
+        return (character >= '0' && character <= '9') ||
+               (character >= 'a' && character <= 'f') ||
+               (character >= 'A' && character <= 'F');
+    };
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        const unsigned char character = static_cast<unsigned char>(value[index]);
+        if (character == '%') {
+            if (index + 2U >= value.size() || !is_hex(value[index + 1U]) ||
+                !is_hex(value[index + 2U])) {
+                return false;
+            }
+            index += 2U;
+        } else if (character < 0x20U || character == 0x7fU || character >= 0x80U ||
+                   std::isspace(character) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_dns_host(std::string_view host) noexcept {
+    if (host.empty() || host.front() == '.' || host.back() == '.') {
+        return false;
+    }
+    bool all_numeric = true;
+    std::size_t label_count = 0U;
+    std::size_t label_start = 0U;
+    while (label_start < host.size()) {
+        const std::size_t label_end = host.find('.', label_start);
+        const std::size_t end = label_end == std::string_view::npos ? host.size() : label_end;
+        if (end == label_start || host[label_start] == '-' || host[end - 1U] == '-') {
+            return false;
+        }
+        for (std::size_t index = label_start; index < end; ++index) {
+            const unsigned char character = static_cast<unsigned char>(host[index]);
+            if (character < '0' || character > '9') {
+                all_numeric = false;
+            }
+            if (!((character >= 'A' && character <= 'Z') ||
+                  (character >= 'a' && character <= 'z') ||
+                  (character >= '0' && character <= '9') || character == '-')) {
+                return false;
+            }
+        }
+        ++label_count;
+        if (label_end == std::string_view::npos) {
+            break;
+        }
+        label_start = label_end + 1U;
+    }
+    if (all_numeric && label_count == 4U) {
+        label_start = 0U;
+        while (label_start < host.size()) {
+            const std::size_t label_end = host.find('.', label_start);
+            const std::size_t end = label_end == std::string_view::npos ? host.size() : label_end;
+            unsigned int value = 0U;
+            for (std::size_t index = label_start; index < end; ++index) {
+                value = value * 10U + static_cast<unsigned int>(host[index] - '0');
+            }
+            if (value > 255U) {
+                return false;
+            }
+            if (label_end == std::string_view::npos) {
+                break;
+            }
+            label_start = label_end + 1U;
+        }
+    }
+    return true;
+}
+
+bool valid_ipv6_literal(std::string_view host) noexcept {
+    const std::size_t zone = host.find('%');
+    const std::string_view address = host.substr(0U, zone);
+    if (address.empty()) {
+        return false;
+    }
+    if (zone != std::string_view::npos &&
+        (zone + 3U > host.size() || host.substr(zone, 3U) != "%25")) {
+        return false;
+    }
+    const bool compressed = address.find("::") != std::string_view::npos;
+    if (compressed && address.find("::", address.find("::") + 2U) !=
+                          std::string_view::npos) {
+        return false;
+    }
+    const std::size_t compression = address.find("::");
+    const std::string_view left = compressed ? address.substr(0U, compression) : address;
+    const std::string_view right = compressed ? address.substr(compression + 2U) : "";
+    auto count_groups = [](std::string_view part) noexcept -> int {
+        if (part.empty()) {
+            return 0;
+        }
+        int groups = 0;
+        std::size_t start = 0U;
+        while (start < part.size()) {
+            const std::size_t end = part.find(':', start);
+            const std::size_t stop = end == std::string_view::npos ? part.size() : end;
+            if (stop == start || stop - start > 4U) {
+                return -1;
+            }
+            for (std::size_t index = start; index < stop; ++index) {
+                const unsigned char character = static_cast<unsigned char>(part[index]);
+                if (!((character >= 'A' && character <= 'F') ||
+                      (character >= 'a' && character <= 'f') ||
+                      (character >= '0' && character <= '9'))) {
+                    return -1;
+                }
+            }
+            ++groups;
+            if (end == std::string_view::npos) {
+                break;
+            }
+            start = end + 1U;
+        }
+        return groups;
+    };
+    const int groups = count_groups(left) + count_groups(right);
+    if (groups < 0 || (compressed ? groups >= 8 : groups != 8)) {
+        return false;
+    }
+    if (address.find(':') == std::string_view::npos) {
+            return false;
+    }
+    return host.find(':') != std::string_view::npos;
+}
+
+bool valid_port(std::string_view port) noexcept {
+    if (port.empty() || port.size() > 5U) {
+        return false;
+    }
+    std::uint32_t value = 0U;
+    for (const unsigned char character : port) {
+        if (character < '0' || character > '9') {
+            return false;
+        }
+        value = value * 10U + static_cast<std::uint32_t>(character - '0');
+    }
+    return value <= 65535U;
 }
 
 bool valid_method(HttpMethod method) noexcept {
@@ -79,7 +234,8 @@ bool valid_url(std::string_view value) noexcept {
         authority_start, authority_end == std::string_view::npos
                               ? std::string_view::npos
                               : authority_end - authority_start);
-    if (authority.empty() || value.find('@', authority_start) != std::string_view::npos) {
+    if (authority.empty() || authority.find('@') != std::string_view::npos ||
+        value.find('#') != std::string_view::npos) {
         return false;
     }
     for (const unsigned char character : value) {
@@ -87,25 +243,82 @@ bool valid_url(std::string_view value) noexcept {
             return false;
         }
     }
+    if (!valid_percent_escapes(value)) {
+        return false;
+    }
+    if (authority.front() == '[') {
+        const std::size_t closing = authority.find(']');
+        if (closing == std::string_view::npos ||
+            !valid_ipv6_literal(authority.substr(1U, closing - 1U))) {
+            return false;
+        }
+        if (closing + 1U < authority.size() &&
+            (authority[closing + 1U] != ':' ||
+             !valid_port(authority.substr(closing + 2U)))) {
+            return false;
+        }
+    } else {
+        const std::size_t colon = authority.find(':');
+        const std::string_view host = authority.substr(0U, colon);
+        if (!valid_dns_host(host)) {
+            return false;
+        }
+        if (colon != std::string_view::npos && !valid_port(authority.substr(colon + 1U))) {
+            return false;
+        }
+    }
     return true;
+}
+
+std::size_t header_bytes(const std::vector<TransportHeader>& headers) noexcept {
+    std::size_t total = 0U;
+    for (const TransportHeader& header : headers) {
+        if (total > std::numeric_limits<std::size_t>::max() - header.name.size() -
+                              header.value.size()) {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        total += header.name.size() + header.value.size();
+    }
+    return total;
+}
+
+Result<void> append_header_impl(std::vector<TransportHeader>& headers, std::string name,
+                                std::string value, std::string operation) {
+    if (!valid_header_name(name) || value.size() > kMaxHeaderValueBytes || has_control(value)) {
+        return Result<void>::failure(
+            invalid("invalid transport header", std::move(operation)));
+    }
+    if (headers.size() >= kMaxHeaders ||
+        header_bytes(headers) > kMaxHeaderBytes - name.size() - value.size()) {
+        return Result<void>::failure(
+            invalid("transport header limits exceeded", std::move(operation)));
+    }
+    const std::string canonical = lowercase(name);
+    headers.push_back(TransportHeader{canonical, std::move(value)});
+    return Result<void>::success();
 }
 
 Result<void> set_header_impl(std::vector<TransportHeader>& headers, std::string name,
                              std::string value, std::string operation) {
-    if (!valid_header_name(name) || has_control(value)) {
+    if (!valid_header_name(name) || value.size() > kMaxHeaderValueBytes || has_control(value)) {
         return Result<void>::failure(
             invalid("invalid transport header", std::move(operation)));
     }
     const std::string canonical = lowercase(name);
-    const auto existing = std::find_if(
-        headers.begin(), headers.end(), [&canonical](const TransportHeader& header) {
-            return header.name == canonical;
-        });
-    if (existing != headers.end()) {
-        existing->value = std::move(value);
-    } else {
-        headers.push_back(TransportHeader{canonical, std::move(value)});
+    std::vector<TransportHeader> replacement;
+    replacement.reserve(headers.size() + 1U);
+    for (TransportHeader& header : headers) {
+        if (header.name != canonical) {
+            replacement.push_back(std::move(header));
+        }
     }
+    if (replacement.size() >= kMaxHeaders ||
+        header_bytes(replacement) > kMaxHeaderBytes - canonical.size() - value.size()) {
+        return Result<void>::failure(
+            invalid("transport header limits exceeded", std::move(operation)));
+    }
+    replacement.push_back(TransportHeader{canonical, std::move(value)});
+    headers = std::move(replacement);
     return Result<void>::success();
 }
 
@@ -120,6 +333,18 @@ std::optional<std::string> find_header(const std::vector<TransportHeader>& heade
         return std::nullopt;
     }
     return found->value;
+}
+
+std::vector<std::string> find_headers(const std::vector<TransportHeader>& headers,
+                                      std::string_view name) {
+    const std::string canonical = lowercase(name);
+    std::vector<std::string> values;
+    for (const TransportHeader& header : headers) {
+        if (header.name == canonical) {
+            values.push_back(header.value);
+        }
+    }
+    return values;
 }
 
 }  // namespace
@@ -161,6 +386,10 @@ std::optional<std::string> TransportRequest::header(std::string_view name) const
     return find_header(m_headers, name);
 }
 
+std::vector<std::string> TransportRequest::headers(std::string_view name) const {
+    return find_headers(m_headers, name);
+}
+
 Result<TransportResponse> TransportResponse::create(std::uint16_t status) {
     if (status < 100U || status > 599U) {
         return Result<TransportResponse>::failure(
@@ -173,8 +402,17 @@ Result<void> TransportResponse::set_header(std::string name, std::string value) 
     return set_header_impl(m_headers, std::move(name), std::move(value), "transport.response");
 }
 
+Result<void> TransportResponse::append_header(std::string name, std::string value) {
+    return append_header_impl(m_headers, std::move(name), std::move(value),
+                              "transport.response");
+}
+
 std::optional<std::string> TransportResponse::header(std::string_view name) const {
     return find_header(m_headers, name);
+}
+
+std::vector<std::string> TransportResponse::headers(std::string_view name) const {
+    return find_headers(m_headers, name);
 }
 
 FakeTransport::FakeTransport(Handler handler) : m_handler(std::move(handler)) {}
@@ -193,7 +431,15 @@ Result<TransportResponse> FakeTransport::send(const TransportRequest& request,
         return Result<TransportResponse>::failure(
             transport_error("fake transport has no handler"));
     }
-    return m_handler(request, cancellation);
+    try {
+        return m_handler(request, cancellation);
+    } catch (const std::exception&) {
+        return Result<TransportResponse>::failure(
+            transport_error("fake transport handler threw an exception"));
+    } catch (...) {
+        return Result<TransportResponse>::failure(
+            transport_error("fake transport handler threw an unknown exception"));
+    }
 }
 
 std::vector<TransportRequest> FakeTransport::requests() const {

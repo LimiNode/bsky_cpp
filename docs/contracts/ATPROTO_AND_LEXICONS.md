@@ -50,5 +50,21 @@ M1b exposes owned `TransportRequest` and `TransportResponse` values, a
 transport-neutral synchronous `Transport` interface, and a deterministic
 `FakeTransport` for tests. Requests accept only absolute HTTP(S) URLs, reject
 credential-bearing authorities and header control characters, and own their
-body bytes. Cancellation is observed before adapter dispatch. Async admission,
-executor ownership, and callback delivery remain M1c responsibilities.
+body bytes. URL validation is syntactic only: it checks DNS-style hosts,
+bracketed IPv6 literals, decimal ports, and percent escapes without DNS
+resolution or an SSRF allowlist. HTTP URL fragments are rejected because they
+are not request-target data. Headers are ASCII-token names with bounded count
+and field sizes; request `set_header()` replaces a name, while
+`append_header()` preserves repeated response fields such as `Set-Cookie`.
+Cancellation is observed before adapter dispatch. The fake transport contains
+handler exceptions as generic typed transport errors without copying exception
+text into diagnostics.
+
+The synchronous `Transport::send()` is an explicitly limited blocking seam,
+not the SDK's application-facing async API. M1c must invoke blocking
+implementations through a bounded worker bridge and keep event/callback threads
+non-blocking; a native-async adapter may be added behind the operation layer
+without changing request/response ownership. Async admission, executor
+ownership, shutdown, and callback delivery remain M1c responsibilities. Body
+size limits, streaming, and backpressure are owned by the concrete adapter and
+its M1c integration rather than by a global transport value limit.

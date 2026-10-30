@@ -40,7 +40,7 @@ A document, example, or roadmap item is not evidence of an implementation.
 
 ## Planned
 
-- M1b and later protocol/transport work through M5 as described in
+- M1c and later protocol/transport work through M5 as described in
   [`ROADMAP.md`](ROADMAP.md).
 
 ## Deferred

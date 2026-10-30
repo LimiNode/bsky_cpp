@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace bsky_cpp {
@@ -45,6 +46,9 @@ public:
     /// Finds a header by case-insensitive name.
     std::optional<std::string> header(std::string_view name) const;
 
+    /// Returns all values for a case-insensitive header name in wire order.
+    std::vector<std::string> headers(std::string_view name) const;
+
 private:
     TransportRequest(HttpMethod method, std::string url)
         : m_method(method), m_url(std::move(url)) {}
@@ -65,14 +69,20 @@ public:
     const std::vector<TransportHeader>& headers() const noexcept { return m_headers; }
     const std::vector<std::uint8_t>& body() const noexcept { return m_body; }
 
-    /// Adds or replaces a case-insensitive response header name.
+    /// Adds or replaces all response fields with a case-insensitive name.
     Result<void> set_header(std::string name, std::string value);
+
+    /// Appends a repeated response header field without changing existing order.
+    Result<void> append_header(std::string name, std::string value);
 
     /// Replaces the owned response body.
     void set_body(std::vector<std::uint8_t> body) noexcept { m_body = std::move(body); }
 
     /// Finds a header by case-insensitive name.
     std::optional<std::string> header(std::string_view name) const;
+
+    /// Returns all values for a case-insensitive header name in wire order.
+    std::vector<std::string> headers(std::string_view name) const;
 
 private:
     explicit TransportResponse(std::uint16_t status) : m_status(status) {}
@@ -86,7 +96,9 @@ private:
 ///
 /// Implementations own their connection and buffering strategy. The request,
 /// response, and body values are owned and remain valid independently of any
-/// adapter buffers. Async operation admission and callback delivery are M1c.
+/// adapter buffers. This is a low-level blocking seam: M1c must invoke it from
+/// a bounded worker bridge and never from an event or callback thread. Native
+/// async adapter integration and operation admission remain M1c responsibilities.
 class Transport {
 public:
     virtual ~Transport() = default;
@@ -103,6 +115,11 @@ public:
         const TransportRequest&, CancellationToken)>;
 
     /// Creates a fake transport with an optional request handler.
+    ///
+    /// Request history is safe for concurrent access. The handler is invoked
+    /// outside the history mutex and must be thread-safe when `send()` is
+    /// called concurrently. Exceptions from the handler are contained and
+    /// mapped to a generic transport error without exposing `what()` text.
     explicit FakeTransport(Handler handler = {});
 
     Result<TransportResponse> send(const TransportRequest& request,
