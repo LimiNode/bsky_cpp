@@ -1,3 +1,5 @@
+/// \file bsky_error.hpp
+/// \brief Typed diagnostic errors with bounded metadata redaction.
 #pragma once
 
 #include <cstdint>
@@ -25,6 +27,8 @@ enum class ErrorCategory : std::uint8_t {
 };
 
 /// Returns a stable diagnostic name for an error category.
+/// \param category Error category.
+/// \return Stable lowercase category name.
 const char* error_category_name(ErrorCategory category) noexcept;
 
 /// A diagnostic error value with a deny-by-default metadata redaction policy.

@@ -1,3 +1,5 @@
+/// \file transport.hpp
+/// \brief Transport-neutral HTTP request, response, and adapter contracts.
 #pragma once
 
 #include "bsky_cpp/core/cancellation.hpp"
@@ -24,6 +26,8 @@ enum class HttpMethod : std::uint8_t {
 };
 
 /// Returns the wire spelling of an HTTP method, or `UNKNOWN` for an invalid enum.
+/// \param method HTTP method value.
+/// \return Uppercase wire spelling or `UNKNOWN`.
 const char* http_method_name(HttpMethod method) noexcept;
 
 /// A bounded, owned HTTP header entry.
@@ -62,7 +66,6 @@ public:
     /// \return Success or an InvalidArgument/limit error.
     Result<void> set_header(std::string name, std::string value);
 
-    /// Replaces the owned request body.
     /// Replaces the owned request body.
     /// \param body Body bytes to own.
     void set_body(std::vector<std::uint8_t> body) noexcept { m_body = std::move(body); }
@@ -118,7 +121,6 @@ public:
     Result<void> append_header(std::string name, std::string value);
 
     /// Replaces the owned response body.
-    /// Replaces the owned response body.
     /// \param body Body bytes to own.
     void set_body(std::vector<std::uint8_t> body) noexcept { m_body = std::move(body); }
 
@@ -142,8 +144,8 @@ private:
 
 /// Transport-neutral synchronous request boundary.
 ///
-/// Implementations own their connection and buffering strategy. The request,
-/// response, and body values are owned and remain valid independently of any
+/// Implementations own their connection and buffering strategy. Request and
+/// response values own their body buffers and remain valid independently of any
 /// adapter buffers. This is a low-level blocking seam: M1c must invoke it from
 /// a bounded worker bridge and never from an event or callback thread. It is
 /// not a required implementation path for native-async adapters: a future

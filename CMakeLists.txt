@@ -26,6 +26,15 @@ set(BSKY_PUBLIC_HEADERS
     src/bsky_cpp/transport/transport.hpp
 )
 
+# Canonical public-header names, derived from the source allowlist. Every
+# install, documentation, and compile-only API check is generated from this
+# list; private detail headers are intentionally absent.
+set(BSKY_PUBLIC_HEADER_NAMES)
+foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
+    file(RELATIVE_PATH header_name "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
+    list(APPEND BSKY_PUBLIC_HEADER_NAMES "${header_name}")
+endforeach()
+
 set(BSKY_CORE_SOURCES
     src/bsky_cpp/core/cancellation.cpp
     src/bsky_cpp/core/bsky_error.cpp
@@ -81,6 +90,10 @@ if(BSKY_BUILD_DOCUMENTATION)
     find_package(Doxygen REQUIRED)
     set(BSKY_DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/docs/doxygen")
     file(MAKE_DIRECTORY "${BSKY_DOXYGEN_OUTPUT_DIRECTORY}")
+    set(BSKY_DOXYGEN_INPUT)
+    foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
+        string(APPEND BSKY_DOXYGEN_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${header} ")
+    endforeach()
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Doxyfile.in"
         "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
@@ -100,22 +113,16 @@ install(TARGETS bsky_cpp
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(FILES src/bsky_cpp.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(FILES
-    src/bsky_cpp/core/bsky_error.hpp
-    src/bsky_cpp/core/cancellation.hpp
-    src/bsky_cpp/core/result.hpp
-    src/bsky_cpp/core/version.hpp
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/bsky_cpp/core
-)
-install(FILES
-    src/bsky_cpp/atproto/identifiers.hpp
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/bsky_cpp/atproto
-)
-install(FILES
-    src/bsky_cpp/transport/transport.hpp
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/bsky_cpp/transport
-)
+foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
+    file(RELATIVE_PATH header_name "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
+    get_filename_component(header_directory "${header_name}" DIRECTORY)
+    if(header_directory STREQUAL ".")
+        set(header_destination "${CMAKE_INSTALL_INCLUDEDIR}")
+    else()
+        set(header_destination "${CMAKE_INSTALL_INCLUDEDIR}/${header_directory}")
+    endif()
+    install(FILES "${header}" DESTINATION "${header_destination}")
+endforeach()
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfigVersion.cmake"

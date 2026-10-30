@@ -1,3 +1,5 @@
+/// \file identifiers.hpp
+/// \brief Strict AT Protocol identifier value types.
 #pragma once
 
 #include "bsky_cpp/core/result.hpp"
@@ -27,8 +29,9 @@ public:
     /// Returns the canonical DID spelling.
     /// \return The canonical DID.
     const std::string& to_string() const noexcept { return m_canonical; }
-    /// Reports whether the method is supported by this SDK.
-    /// \return `true` when the method has a built-in implementation.
+    /// Reports whether the method has a built-in local interpretation.
+    /// This does not perform DID resolution or network I/O.
+    /// \return `true` for methods recognized by the current implementation.
     bool is_supported_method() const noexcept { return m_supported; }
 
     /// Compares canonical DID spellings.

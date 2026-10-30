@@ -55,15 +55,6 @@ bsky_cpp_enable_sanitizers(bsky_cpp_umbrella)
 add_test(NAME bsky_cpp.umbrella COMMAND bsky_cpp_umbrella)
 set_tests_properties(bsky_cpp.umbrella PROPERTIES TIMEOUT 10)
 
-set(BSKY_PUBLIC_HEADER_NAMES
-    bsky_cpp.hpp
-    bsky_cpp/core/bsky_error.hpp
-    bsky_cpp/core/cancellation.hpp
-    bsky_cpp/core/result.hpp
-    bsky_cpp/core/version.hpp
-    bsky_cpp/atproto/identifiers.hpp
-    bsky_cpp/transport/transport.hpp
-)
 foreach(header IN LISTS BSKY_PUBLIC_HEADER_NAMES)
     string(REPLACE "/" "_" header_target "${header}")
     string(REPLACE "." "_" header_target "${header_target}")

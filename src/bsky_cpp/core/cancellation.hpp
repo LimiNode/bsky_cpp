@@ -1,3 +1,5 @@
+/// \file cancellation.hpp
+/// \brief Cooperative cancellation source and observation token.
 #pragma once
 
 #include <atomic>

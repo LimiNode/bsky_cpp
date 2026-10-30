@@ -33,7 +33,15 @@ surface. Open questions must remain explicitly marked as open questions.
 
 ## Repository layout and dependencies
 
-- Colocate library `.hpp` and `.cpp` files under `src/bsky_cpp/`.
+- Colocate library `.hpp` and `.cpp` files under the owning domain directory
+  below `src/bsky_cpp/`: `core/`, `atproto/`, or `transport/`. New domains
+  require a reviewed boundary; do not create empty placeholder directories.
+- Keep domain-private implementation headers in that domain's `detail/`
+  directory. Do not add unrelated types to generic `utils/`, `data/`, or
+  `enums/` buckets.
+- Include the complete SDK with `<bsky_cpp.hpp>` or use a narrow domain include
+  for a focused dependency. The explicit `BSKY_PUBLIC_HEADERS` allowlist is
+  the source of truth for installation and API checks.
 - Keep generated build, install, and external-consumer trees under `build/`.
 - Put approved managed dependencies in flat, direct Git submodules at
   `external/<dependency>/`; pin each gitlink to a reviewed commit SHA.
@@ -55,6 +63,14 @@ surface. Open questions must remain explicitly marked as open questions.
    lifetime, thread safety, cancellation, and network guarantees in Doxygen.
 4. Add or update an ADR when a decision changes a boundary or dependency.
 5. Run `git diff --check` and link-check or grep checks before review.
+
+When public headers change, run the optional documentation target and keep its
+generated output under `build/`:
+
+```text
+cmake -S . -B build/docs -DBSKY_BUILD_TESTS=OFF -DBSKY_BUILD_DOCUMENTATION=ON
+cmake --build build/docs --target bsky_cpp_docs
+```
 
 See `docs/guides/coding-agent-workflow.md` for the complete Definition of Done.
 

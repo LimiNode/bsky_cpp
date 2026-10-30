@@ -21,7 +21,9 @@ A document, example, or roadmap item is not evidence of an implementation.
   [`transport/transport.hpp`](../src/bsky_cpp/transport/transport.hpp), with unit coverage.
 - Stage 1 source layout: domain-oriented `core/`, `atproto/`, and `transport/`
   headers with the canonical [`bsky_cpp.hpp`](../src/bsky_cpp.hpp) umbrella
-  include and an optional Doxygen documentation target.
+  include and an optional Doxygen documentation target. The public-header
+  allowlist generates installation, Doxygen input, and compile-only API checks;
+  CI runs the documentation target with warnings treated as errors.
 
 ## Partial
 

@@ -1,3 +1,5 @@
+/// \file version.hpp
+/// \brief Compile-time and linked-library version reporting.
 #pragma once
 
 #include <cstdint>

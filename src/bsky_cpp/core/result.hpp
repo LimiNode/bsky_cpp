@@ -1,3 +1,5 @@
+/// \file result.hpp
+/// \brief Value-or-error result containers for the public SDK API.
 #pragma once
 
 #include "bsky_cpp/core/bsky_error.hpp"
@@ -12,8 +14,10 @@ namespace bsky_cpp {
 
 /// Holds either a successful value or one typed Error.
 ///
-/// The state is immutable after construction; assignment is intentionally
-/// deleted so the public API cannot expose `std::variant::valueless_by_exception`.
+/// The alternative selected by the result is stable after construction;
+/// contained values are intentionally mutable through the non-const accessors.
+/// Assignment is intentionally deleted so the public API cannot expose
+/// `std::variant::valueless_by_exception`.
 /// \par Thread safety
 /// Not thread-safe; synchronize access to a shared instance.
 /// \tparam T Successful value type.

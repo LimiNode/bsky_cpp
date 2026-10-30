@@ -4,13 +4,7 @@ PROJECT_BRIEF          = "Modern C++17 Bluesky and AT Protocol client SDK"
 OUTPUT_DIRECTORY       = @BSKY_DOXYGEN_OUTPUT_DIRECTORY@
 CREATE_SUBDIRS         = NO
 OUTPUT_LANGUAGE        = English
-INPUT                  = @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp.hpp \
-                         @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/core/bsky_error.hpp \
-                         @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/core/cancellation.hpp \
-                         @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/core/result.hpp \
-                         @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/core/version.hpp \
-                         @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/atproto/identifiers.hpp \
-                         @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/transport/transport.hpp
+INPUT                  = @BSKY_DOXYGEN_INPUT@
 RECURSIVE              = NO
 FILE_PATTERNS          = *.hpp
 EXCLUDE                = @CMAKE_CURRENT_SOURCE_DIR@/src/bsky_cpp/*/detail
