@@ -14,11 +14,14 @@ A document, example, or roadmap item is not evidence of an implementation.
   diagnostic metadata, and cooperative cancellation with race-focused tests.
 - M1a identifier primitives: strict `Did`, `Handle`, `Nsid`, `RecordKey`,
   `AtUri`, structural `Cid`, and `StrongRef` parsing in
-  [`identifiers.hpp`](../src/bsky_cpp/identifiers.hpp), with unit and
+  [`atproto/identifiers.hpp`](../src/bsky_cpp/atproto/identifiers.hpp), with unit and
   installed-consumer coverage.
 - M1b transport seam: owned typed request/response values, the transport
   interface, and deterministic cancellation-aware `FakeTransport` in
-  [`transport.hpp`](../src/bsky_cpp/transport.hpp), with unit coverage.
+  [`transport/transport.hpp`](../src/bsky_cpp/transport/transport.hpp), with unit coverage.
+- Stage 1 source layout: domain-oriented `core/`, `atproto/`, and `transport/`
+  headers with the canonical [`bsky_cpp.hpp`](../src/bsky_cpp.hpp) umbrella
+  include and an optional Doxygen documentation target.
 
 ## Partial
 

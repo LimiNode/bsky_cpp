@@ -1,6 +1,6 @@
-#include "bsky_cpp/cancellation.hpp"
-#include "bsky_cpp/error.hpp"
-#include "bsky_cpp/result.hpp"
+#include "bsky_cpp/core/cancellation.hpp"
+#include "bsky_cpp/core/bsky_error.hpp"
+#include "bsky_cpp/core/result.hpp"
 
 #include "test_support.hpp"
 

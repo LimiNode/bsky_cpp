@@ -1,4 +1,4 @@
-#include "bsky_cpp/version.hpp"
+#include "bsky_cpp/core/version.hpp"
 
 namespace bsky_cpp {
 

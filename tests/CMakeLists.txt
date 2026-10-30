@@ -46,3 +46,36 @@ bsky_cpp_enable_sanitizers(bsky_cpp_transport)
 
 add_test(NAME bsky_cpp.transport COMMAND bsky_cpp_transport)
 set_tests_properties(bsky_cpp.transport PROPERTIES TIMEOUT 10)
+
+add_executable(bsky_cpp_umbrella
+    umbrella.cpp
+)
+target_link_libraries(bsky_cpp_umbrella PRIVATE bsky_cpp::bsky_cpp)
+bsky_cpp_enable_sanitizers(bsky_cpp_umbrella)
+add_test(NAME bsky_cpp.umbrella COMMAND bsky_cpp_umbrella)
+set_tests_properties(bsky_cpp.umbrella PROPERTIES TIMEOUT 10)
+
+set(BSKY_PUBLIC_HEADER_NAMES
+    bsky_cpp.hpp
+    bsky_cpp/core/bsky_error.hpp
+    bsky_cpp/core/cancellation.hpp
+    bsky_cpp/core/result.hpp
+    bsky_cpp/core/version.hpp
+    bsky_cpp/atproto/identifiers.hpp
+    bsky_cpp/transport/transport.hpp
+)
+foreach(header IN LISTS BSKY_PUBLIC_HEADER_NAMES)
+    string(REPLACE "/" "_" header_target "${header}")
+    string(REPLACE "." "_" header_target "${header_target}")
+    add_executable("bsky_cpp_header_${header_target}"
+        header_self_containment.cpp
+    )
+    target_compile_definitions("bsky_cpp_header_${header_target}" PRIVATE
+        BSKY_HEADER="${header}"
+    )
+    target_link_libraries("bsky_cpp_header_${header_target}" PRIVATE bsky_cpp::bsky_cpp)
+    bsky_cpp_enable_sanitizers("bsky_cpp_header_${header_target}")
+    add_test(NAME "bsky_cpp.header.${header_target}"
+        COMMAND "bsky_cpp_header_${header_target}")
+    set_tests_properties("bsky_cpp.header.${header_target}" PROPERTIES TIMEOUT 10)
+endforeach()

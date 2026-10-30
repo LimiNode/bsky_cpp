@@ -1,7 +1,7 @@
 #pragma once
 
-#include "bsky_cpp/cancellation.hpp"
-#include "bsky_cpp/result.hpp"
+#include "bsky_cpp/core/cancellation.hpp"
+#include "bsky_cpp/core/result.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -15,14 +15,22 @@
 namespace bsky_cpp {
 
 /// HTTP method used by a transport request.
-enum class HttpMethod : std::uint8_t { Get, Post, Put, Patch, Delete };
+enum class HttpMethod : std::uint8_t {
+    Get,    ///< GET request.
+    Post,   ///< POST request.
+    Put,    ///< PUT request.
+    Patch,  ///< PATCH request.
+    Delete  ///< DELETE request.
+};
 
 /// Returns the wire spelling of an HTTP method, or `UNKNOWN` for an invalid enum.
 const char* http_method_name(HttpMethod method) noexcept;
 
 /// A bounded, owned HTTP header entry.
 struct TransportHeader {
+    /// Lowercase field name.
     std::string name;
+    /// Field value without control characters.
     std::string value;
 };
 
@@ -30,23 +38,43 @@ struct TransportHeader {
 class TransportRequest {
 public:
     /// Creates a request after validating its method and absolute HTTP URL.
+    /// \param method HTTP method.
+    /// \param url Absolute HTTP or HTTPS URL.
+    /// \return A validated request or an InvalidArgument error.
     static Result<TransportRequest> create(HttpMethod method, std::string url);
 
+    /// Returns the request method.
+    /// \return The HTTP method.
     HttpMethod method() const noexcept { return m_method; }
+    /// Returns the validated absolute URL.
+    /// \return The request URL.
     const std::string& url() const noexcept { return m_url; }
+    /// Returns all owned request headers in wire order.
+    /// \return The request header list.
     const std::vector<TransportHeader>& headers() const noexcept { return m_headers; }
+    /// Returns the owned request body.
+    /// \return The request body bytes.
     const std::vector<std::uint8_t>& body() const noexcept { return m_body; }
 
     /// Adds or replaces a case-insensitive header name.
+    /// \param name Header name.
+    /// \param value Header value.
+    /// \return Success or an InvalidArgument/limit error.
     Result<void> set_header(std::string name, std::string value);
 
     /// Replaces the owned request body.
+    /// Replaces the owned request body.
+    /// \param body Body bytes to own.
     void set_body(std::vector<std::uint8_t> body) noexcept { m_body = std::move(body); }
 
     /// Finds a header by case-insensitive name.
+    /// \param name Header name.
+    /// \return The first matching value, if present.
     std::optional<std::string> header(std::string_view name) const;
 
     /// Returns all values for a case-insensitive header name in wire order.
+    /// \param name Header name.
+    /// \return Matching values.
     std::vector<std::string> headers(std::string_view name) const;
 
 private:
@@ -63,25 +91,45 @@ private:
 class TransportResponse {
 public:
     /// Creates a response with an HTTP status in the 100..599 range.
+    /// \param status HTTP status code.
+    /// \return A validated response or an InvalidArgument error.
     static Result<TransportResponse> create(std::uint16_t status);
 
+    /// Returns the HTTP status code.
+    /// \return The status code.
     std::uint16_t status() const noexcept { return m_status; }
+    /// Returns all owned response headers in wire order.
+    /// \return The response header list.
     const std::vector<TransportHeader>& headers() const noexcept { return m_headers; }
+    /// Returns the owned response body.
+    /// \return The response body bytes.
     const std::vector<std::uint8_t>& body() const noexcept { return m_body; }
 
     /// Adds or replaces all response fields with a case-insensitive name.
+    /// \param name Header name.
+    /// \param value Header value.
+    /// \return Success or an InvalidArgument/limit error.
     Result<void> set_header(std::string name, std::string value);
 
     /// Appends a repeated response header field without changing existing order.
+    /// \param name Header name.
+    /// \param value Header value.
+    /// \return Success or an InvalidArgument/limit error.
     Result<void> append_header(std::string name, std::string value);
 
     /// Replaces the owned response body.
+    /// Replaces the owned response body.
+    /// \param body Body bytes to own.
     void set_body(std::vector<std::uint8_t> body) noexcept { m_body = std::move(body); }
 
     /// Finds a header by case-insensitive name.
+    /// \param name Header name.
+    /// \return The first matching value, if present.
     std::optional<std::string> header(std::string_view name) const;
 
     /// Returns all values for a case-insensitive header name in wire order.
+    /// \param name Header name.
+    /// \return Matching values.
     std::vector<std::string> headers(std::string_view name) const;
 
 private:
@@ -107,6 +155,9 @@ public:
     virtual ~Transport() = default;
 
     /// Sends one request, cooperatively observing cancellation.
+    /// \param request Owned request value.
+    /// \param cancellation Cooperative cancellation token.
+    /// \return A response or a typed transport/cancellation error.
     virtual Result<TransportResponse> send(const TransportRequest& request,
                                             CancellationToken cancellation) = 0;
 };
@@ -114,6 +165,7 @@ public:
 /// Deterministic in-memory transport for unit and conformance tests.
 class FakeTransport final : public Transport {
 public:
+    /// Callback signature used to produce a deterministic response.
     using Handler = std::function<Result<TransportResponse>(
         const TransportRequest&, CancellationToken)>;
 
@@ -123,12 +175,14 @@ public:
     /// outside the history mutex and must be thread-safe when `send()` is
     /// called concurrently. Exceptions from the handler are contained and
     /// mapped to a generic transport error without exposing `what()` text.
+    /// \param handler Optional deterministic response callback.
     explicit FakeTransport(Handler handler = {});
 
     Result<TransportResponse> send(const TransportRequest& request,
                                    CancellationToken cancellation) override;
 
     /// Returns an owned snapshot of requests accepted by the fake.
+    /// \return Requests in acceptance order.
     std::vector<TransportRequest> requests() const;
 
     /// Removes the recorded request history.
