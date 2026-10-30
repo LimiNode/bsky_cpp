@@ -182,6 +182,36 @@ bool valid_dns_host(std::string_view host) noexcept {
     return true;
 }
 
+bool valid_ipv4_literal(std::string_view value) noexcept {
+    std::size_t start = 0U;
+    std::size_t components = 0U;
+    while (start < value.size()) {
+        const std::size_t end = value.find('.', start);
+        const std::size_t stop = end == std::string_view::npos ? value.size() : end;
+        if (stop == start || stop - start > 3U ||
+            (stop - start > 1U && value[start] == '0')) {
+            return false;
+        }
+        unsigned int component = 0U;
+        for (std::size_t index = start; index < stop; ++index) {
+            const unsigned char character = static_cast<unsigned char>(value[index]);
+            if (character < '0' || character > '9') {
+                return false;
+            }
+            component = component * 10U + static_cast<unsigned int>(character - '0');
+        }
+        if (component > 255U) {
+            return false;
+        }
+        ++components;
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1U;
+    }
+    return components == 4U;
+}
+
 bool valid_ipv6_literal(std::string_view host) noexcept {
     const std::size_t zone = host.find('%');
     const std::string_view address = host.substr(0U, zone);
@@ -217,27 +247,41 @@ bool valid_ipv6_literal(std::string_view host) noexcept {
     const std::size_t compression = address.find("::");
     const std::string_view left = compressed ? address.substr(0U, compression) : address;
     const std::string_view right = compressed ? address.substr(compression + 2U) : "";
-    auto count_groups = [](std::string_view part, int& groups) noexcept {
+    auto count_groups = [](std::string_view part, int& groups, bool allow_ipv4) noexcept {
         groups = 0;
         if (part.empty()) {
             return true;
+        }
+        if (part.back() == ':') {
+            return false;
         }
         std::size_t start = 0U;
         while (start < part.size()) {
             const std::size_t end = part.find(':', start);
             const std::size_t stop = end == std::string_view::npos ? part.size() : end;
-            if (stop == start || stop - start > 4U) {
+            const std::string_view component = part.substr(start, stop - start);
+            if (component.empty()) {
                 return false;
             }
-            for (std::size_t index = start; index < stop; ++index) {
-                const unsigned char character = static_cast<unsigned char>(part[index]);
-                if (!((character >= 'A' && character <= 'F') ||
-                      (character >= 'a' && character <= 'f') ||
-                      (character >= '0' && character <= '9'))) {
+            if (component.find('.') != std::string_view::npos) {
+                if (!allow_ipv4 || end != std::string_view::npos ||
+                    !valid_ipv4_literal(component)) {
                     return false;
                 }
+                groups += 2;
+            } else {
+                if (component.size() > 4U) {
+                    return false;
+                }
+                for (const unsigned char character : component) {
+                    if (!((character >= 'A' && character <= 'F') ||
+                          (character >= 'a' && character <= 'f') ||
+                          (character >= '0' && character <= '9'))) {
+                        return false;
+                    }
+                }
+                ++groups;
             }
-            ++groups;
             if (end == std::string_view::npos) {
                 break;
             }
@@ -247,7 +291,8 @@ bool valid_ipv6_literal(std::string_view host) noexcept {
     };
     int left_groups = 0;
     int right_groups = 0;
-    if (!count_groups(left, left_groups) || !count_groups(right, right_groups)) {
+    if (!count_groups(left, left_groups, !compressed) ||
+        !count_groups(right, right_groups, true)) {
         return false;
     }
     const int groups = left_groups + right_groups;
