@@ -9,9 +9,13 @@
   default lambda captures.
 - Keep transport and persistence types behind interfaces. Public headers must
   compile without optional integrations.
-- Organize library sources under `src/bsky_cpp/`, colocating public `.hpp` and
-  implementation `.cpp` files. Keep `tests/` test fixtures and `examples/`
-  opt-in examples separate.
+- Organize library sources under the owning domain in `src/bsky_cpp/`:
+  `core/`, `atproto/`, or `transport/`. Colocate public `.hpp` and
+  implementation `.cpp` files. Keep `tests/` fixtures and `examples/` opt-in
+  examples separate. Future domains need a reviewed boundary; do not create
+  empty placeholder directories.
+- Keep private headers in a domain-local `detail/` directory. Do not put
+  unrelated types into generic `utils/`, `data/`, or `enums/` directories.
   Keep one primary type per file where practical.
 - Use `.hpp` for public C++ declarations, `.cpp` for compiled implementations,
   and `.ipp`/`.tpp` only for template implementation fragments included by the
@@ -23,9 +27,10 @@
   public header.
 - Use four spaces. Keep comments factual and short; do not use ImGui-style
   naming. Avoid magic domain values and default lambda captures (`[&]`, `[=]`).
-- Prefer `///` Doxygen in English. Use `\brief`, `\tparam`, `\param`,
+- Prefer `///` Doxygen in English. Give every public header a `\file` and
+  `\brief` block. Use `\brief`, `\tparam`, `\param`,
   `\return`, `\throws`, `\pre`, `\post`, `\invariant`, `\complexity`,
-  `\thread_safety`, and `\note`/`\warning` when meaningful. Every public
+  a `Thread safety` paragraph, and `\note`/`\warning` when meaningful. Every public
   parameter and non-void return is documented.
 - Public documentation states ownership/lifetime, thread safety, cancellation,
   callback quiescence, side effects, and network guarantees; `Thread-safe`,

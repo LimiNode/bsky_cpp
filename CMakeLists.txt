@@ -13,23 +13,38 @@ include(CTest)
 option(BSKY_BUILD_TESTS "Build bsky_cpp tests" ${BUILD_TESTING})
 option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
+option(BSKY_BUILD_DOCUMENTATION "Build bsky_cpp Doxygen documentation" OFF)
 
 # Explicit install surface; add public .ipp/.tpp fragments here when needed.
 set(BSKY_PUBLIC_HEADERS
-    src/bsky_cpp/cancellation.hpp
-    src/bsky_cpp/error.hpp
-    src/bsky_cpp/identifiers.hpp
-    src/bsky_cpp/result.hpp
-    src/bsky_cpp/transport.hpp
-    src/bsky_cpp/version.hpp
+    src/bsky_cpp.hpp
+    src/bsky_cpp/core/bsky_error.hpp
+    src/bsky_cpp/core/cancellation.hpp
+    src/bsky_cpp/core/result.hpp
+    src/bsky_cpp/core/version.hpp
+    src/bsky_cpp/atproto/identifiers.hpp
+    src/bsky_cpp/transport/transport.hpp
+)
+
+# Canonical public-header names, derived from the source allowlist. Every
+# install, documentation, and compile-only API check is generated from this
+# list; private detail headers are intentionally absent.
+set(BSKY_PUBLIC_HEADER_NAMES)
+foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
+    file(RELATIVE_PATH header_name "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
+    list(APPEND BSKY_PUBLIC_HEADER_NAMES "${header_name}")
+endforeach()
+
+set(BSKY_CORE_SOURCES
+    src/bsky_cpp/core/cancellation.cpp
+    src/bsky_cpp/core/bsky_error.cpp
+    src/bsky_cpp/core/version.cpp
 )
 
 add_library(bsky_cpp STATIC
-    src/bsky_cpp/cancellation.cpp
-    src/bsky_cpp/error.cpp
-    src/bsky_cpp/identifiers.cpp
-    src/bsky_cpp/transport.cpp
-    src/bsky_cpp/version.cpp
+    ${BSKY_CORE_SOURCES}
+    src/bsky_cpp/atproto/identifiers.cpp
+    src/bsky_cpp/transport/transport.cpp
 )
 add_library(bsky_cpp::bsky_cpp ALIAS bsky_cpp)
 
@@ -71,15 +86,43 @@ if(BSKY_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+if(BSKY_BUILD_DOCUMENTATION)
+    find_package(Doxygen REQUIRED)
+    set(BSKY_DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/docs/doxygen")
+    file(MAKE_DIRECTORY "${BSKY_DOXYGEN_OUTPUT_DIRECTORY}")
+    set(BSKY_DOXYGEN_INPUT)
+    foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
+        string(APPEND BSKY_DOXYGEN_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${header} ")
+    endforeach()
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Doxyfile.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
+        @ONLY
+    )
+    add_custom_target(bsky_cpp_docs
+        COMMAND Doxygen::doxygen "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Building bsky_cpp Doxygen documentation"
+        VERBATIM
+    )
+endif()
+
 install(TARGETS bsky_cpp
     EXPORT bsky_cppTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(FILES ${BSKY_PUBLIC_HEADERS}
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/bsky_cpp
-)
+foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
+    file(RELATIVE_PATH header_name "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
+    get_filename_component(header_directory "${header_name}" DIRECTORY)
+    if(header_directory STREQUAL ".")
+        set(header_destination "${CMAKE_INSTALL_INCLUDEDIR}")
+    else()
+        set(header_destination "${CMAKE_INSTALL_INCLUDEDIR}/${header_directory}")
+    endif()
+    install(FILES "${header}" DESTINATION "${header_destination}")
+endforeach()
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfigVersion.cmake"

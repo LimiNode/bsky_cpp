@@ -27,6 +27,37 @@ loop, or promise server-side semantics that the protocol does not provide.
 Dependencies point downward. High-level code depends on protocol contracts and
 interfaces, never on a concrete HTTP library, MDBX, or an application runtime.
 
+## Source and public-header layout
+
+Public source files remain colocated with their implementation files under
+`src/bsky_cpp/`, organized by ownership domain:
+
+- `core/` — `Error`, `Result`, cancellation, and version primitives;
+- `atproto/` — DID, Handle, NSID, AT URI, CID, and StrongRef values;
+- `transport/` — HTTP request/response values and transport seams.
+
+`src/bsky_cpp.hpp` is the canonical umbrella include and exports only these
+stable public domains. Runtime, XRPC, identity, auth, data, client, streams,
+and adapter directories are future boundaries; they are not created as empty
+placeholders. Private implementation headers, when needed, belong in a local
+domain `detail/` directory and are not installed.
+
+The Stage 1 migration changes direct include paths as follows:
+
+| Previous include | Canonical include |
+| --- | --- |
+| `bsky_cpp/error.hpp` | `bsky_cpp/core/bsky_error.hpp` |
+| `bsky_cpp/result.hpp` | `bsky_cpp/core/result.hpp` |
+| `bsky_cpp/cancellation.hpp` | `bsky_cpp/core/cancellation.hpp` |
+| `bsky_cpp/version.hpp` | `bsky_cpp/core/version.hpp` |
+| `bsky_cpp/identifiers.hpp` | `bsky_cpp/atproto/identifiers.hpp` |
+| `bsky_cpp/transport.hpp` | `bsky_cpp/transport/transport.hpp` |
+
+The SDK is pre-1.0 and has no supported external include compatibility promise;
+therefore no duplicate forwarding headers are installed. C++ names, namespaces,
+runtime behavior, and ownership contracts are unchanged by this file-layout
+migration.
+
 ## Request lifecycle
 
 An operation validates local invariants, resolves an identity and endpoint,

@@ -1,4 +1,4 @@
-#include "bsky_cpp/error.hpp"
+#include "bsky_cpp/core/bsky_error.hpp"
 
 #include <array>
 #include <cctype>

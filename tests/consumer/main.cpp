@@ -1,8 +1,4 @@
-#include <bsky_cpp/cancellation.hpp>
-#include <bsky_cpp/error.hpp>
-#include <bsky_cpp/identifiers.hpp>
-#include <bsky_cpp/result.hpp>
-#include <bsky_cpp/transport.hpp>
+#include <bsky_cpp.hpp>
 
 #include <string>
 

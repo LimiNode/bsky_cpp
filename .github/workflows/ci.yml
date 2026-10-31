@@ -51,3 +51,19 @@ jobs:
         run: cmake --build build/sanitized --parallel
       - name: Test
         run: ctest --test-dir build/sanitized --output-on-failure
+
+  documentation:
+    name: Documentation / Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y doxygen
+      - name: Report Doxygen version
+        run: doxygen --version
+      - name: Configure documentation
+        run: cmake -S . -B build/docs -DBSKY_BUILD_TESTS=OFF -DBSKY_BUILD_DOCUMENTATION=ON
+      - name: Build documentation (warnings are errors)
+        run: timeout --foreground 5m cmake --build build/docs --target bsky_cpp_docs --parallel
