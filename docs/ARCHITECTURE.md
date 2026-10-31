@@ -4,8 +4,12 @@
 
 `bsky_cpp` is a layered client SDK. It models AT Protocol identities and
 records, translates typed application operations to XRPC, and exposes
-asynchronous results. It does not render UI, implement an LLM, own an event
-loop, or promise server-side semantics that the protocol does not provide.
+asynchronous results. Foundation/value targets do not own an event loop. The
+future production async `Client` runtime is intentionally composed over
+`event-hub-cpp`; application-level stream subscriptions, persistence, and
+network adapters remain replaceable boundaries. The SDK does not render UI,
+implement an LLM, or promise server-side semantics that the protocol does not
+provide.
 
 ## Layers
 
@@ -21,11 +25,15 @@ loop, or promise server-side semantics that the protocol does not provide.
 5. **High-level client API** — typed posts, threads, media, social graph,
    profiles, notifications, and chat operations. It is a convenience layer,
    never the only route to an operation.
-6. **Optional infrastructure** — event streaming, persistence, and event-hub
-   integration behind interfaces. The core remains usable in memory.
+6. **Runtime and optional infrastructure** — the production async Client uses
+   an event-hub-cpp-backed runtime; event streaming and persistence are still
+   optional application integrations behind interfaces. Foundation targets
+   remain usable in memory.
 
 Dependencies point downward. High-level code depends on protocol contracts and
-interfaces, never on a concrete HTTP library, MDBX, or an application runtime.
+interfaces, never on a concrete HTTP library, MDBX, or an application-owned
+runtime. The production Client may depend on the SDK's event-hub-backed runtime
+component described by ADR-0004.
 
 ## Source and public-header layout
 
@@ -71,11 +79,13 @@ resources and active callback invocations are quiescent.
 
 ## Async model
 
-The primary surface is asynchronous. Implementations may use a future,
-callback, or sender-like adapter, but each operation must define completion,
-executor/dispatch policy, cancellation, timeout, backpressure, retry, and
-thread-safety semantics. A synchronous facade, if added, is an explicit CLI
-convenience and must not block event callbacks.
+The primary surface is asynchronous. The production Client runtime is planned
+to use event-hub-cpp for scheduling and event orchestration, while the
+operation state machine remains bsky-owned and transport-neutral. Each
+operation must define completion, executor/dispatch policy, cancellation,
+timeout, backpressure, retry, and thread-safety semantics. A synchronous
+facade, if added, is an explicit CLI convenience and must not block event
+callbacks.
 
 ## Extensibility
 

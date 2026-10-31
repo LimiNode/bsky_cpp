@@ -10,7 +10,7 @@ rechecked when a dependency is updated.
 
 | Repository | Exact audited commit | Proposed owner | Current decision |
 | --- | --- | --- | --- |
-| `event-hub-cpp` | `2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0` | upstream project, with a bsky adapter | reuse runtime primitives through a thin adapter; defer dependency adoption until the runtime ADR is implemented |
+| `event-hub-cpp` | `2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0` | upstream project, with a bsky adapter | required runtime infrastructure for the future production async Client; defer integration until M1c |
 | `kurlyk` | `b62cd53f672c47b74bb14d762ea9dc59a9df19ce` | upstream project, with a bsky transport adapter | reuse native async path; keep the public seam transport-neutral; defer OAuth profile work |
 | `time-shield-cpp` | `d5f1203f24341e4146af35d5bb36e762056d181f` | upstream project, with a bsky time adapter | reuse clock/calendar primitives after conformance gate; propose upstream parser fix |
 
@@ -24,7 +24,7 @@ the corresponding integration exists in `bsky_cpp`. M1c remains unimplemented.
 | Capability | Existing API and source evidence | Decision | Missing guarantee / test | Owner / milestone |
 | --- | --- | --- | --- | --- |
 | Hub lifecycle | `ModuleHub::run()` and `start()` initialize modules, run a blocking or background loop, shut down, and rethrow background exceptions (`event-hub-cpp/include/event_hub/module_hub.hpp:279-325`, SHA above). `ModuleExecutionMode` provides `inline_in_hub`, `private_thread`, and `manual` (`module.hpp:26-31`). | Reuse directly through a thin `RuntimeAdapter`; expose managed mode only after M1c. | Need a deterministic test for client destruction, shutdown deadline, and callback quiescence across all module modes. | upstream + bsky adapter, M1c |
-| External/manual execution | `ModuleHub::process_once()` delegates to `process()` (`module_hub.hpp:201-204`); `set_notifier()` wires a non-owning notifier (`module_hub.hpp:264-270`). `RunLoop::process_once()` and `run_until()` aggregate buses and task managers and wait on notifier/deadlines (`run_loop.hpp:129-186`). | Thin adapter in external mode; caller drives `process_once()` and uses a notifier plus deadline hint. | Adapter must not retain a borrowed notifier past its documented lifetime; add a fake-clock/manual-loop test. | bsky adapter, M1c |
+| External/manual execution | `ModuleHub::process_once()` delegates to `process()` (`module_hub.hpp:201-204`); `set_notifier()` wires a non-owning notifier (`module_hub.hpp:264-270`). `RunLoop::process_once()` and `run_until()` aggregate buses and task managers and wait on notifier/deadlines (`run_loop.hpp:129-186`). | Thin adapter in external mode; caller drives `process_once()` and uses a notifier plus deadline hint. | Adapter must not retain a borrowed notifier past its documented lifetime; use controlled fake execution for operation state and bounded real-clock scheduler tests because upstream has no clock injection. | bsky adapter, M1c |
 | Tasks, delay, periodic work | `TaskManager` supports ready/delayed/periodic tasks, `post_every_after`, `cancel`, `next_deadline`, and `TaskContext` cancellation/reschedule (`task_manager.hpp:199-275`, `535-607`, `737-771`, `988-1077`). Periodic scheduling is fixed-delay or fixed-rate (`task.hpp:95-117`). | Reuse directly; do not implement a second task manager. | `TaskManager` is single-consumer for `process()` and has no queue capacity. Test admission/backpressure at the bsky boundary, not by assuming an upstream bound. | upstream + bsky policy, M1c |
 | Priorities and fairness | Three FIFO ready queues are selected high, normal, low (`task.hpp:95-105`; `task_manager.hpp:1120-1129`). | Reuse priority levels as an implementation detail only. | No starvation/fairness guarantee is documented. Add a bounded mixed-priority deterministic test before promising fairness. | bsky conformance, M1c |
 | Task exceptions | `TaskManager::set_exception_handler()` either reports and continues or, without a handler, restores unstarted work and rethrows (`task_manager.hpp:86-92`, `610-673`). | Thin adapter maps an exception to one terminal operation outcome. | Verify callback exceptions cannot create a second terminal `Result`; test handler failure policy. | bsky adapter, M1c |
@@ -37,28 +37,43 @@ the corresponding integration exists in `bsky_cpp`. M1c remains unimplemented.
 
 #### Managed and external modes
 
-Managed mode means the adapter owns a `ModuleHub` lifetime lease and calls
-`start()`/`run()` according to the selected thread policy. External mode means
-the application owns the loop: the adapter installs a notifier, calls
-`process_once()`, and computes a wait from all task, event-awaiter, and transport
-deadlines. The adapter must not build a parallel `TaskManager` or client loop:
-that would duplicate cancellation, wake-up, priority, exception, and shutdown
-semantics already implemented upstream.
+Managed mode means the production runtime owns a `ModuleHub` lifetime lease and
+calls `start()`/`run()` according to the selected thread policy. It is not
+conforming for timed awaiters until upstream fixes deadline aggregation.
+External mode means the application owns the loop: the adapter installs a
+notifier, calls `process_once()`, and computes a wait from all task,
+event-awaiter, and transport deadlines. The adapter must not build a parallel
+`TaskManager` or client loop: that would duplicate cancellation, wake-up,
+priority, exception, and shutdown semantics already implemented upstream.
 
-The `ModuleHub::next_deadline()` omission is an upstream compatibility risk, not
-a local patch target. The minimum deterministic regression test is:
+The `ModuleHub::next_deadline()` omission affects both `run()` and `start()` and
+is an upstream compatibility risk, not a local patch target. External mode
+must aggregate `EventBus::next_awaiter_deadline()` explicitly. Managed mode must
+require an upstream correction before promising timeout delivery, shutdown
+wake-up, or timeout-driven lifetime cleanup. The minimum deterministic
+regression test is:
 
 1. create a hub with an inline module and a queued event-bus awaiter with a
    short timeout;
 2. assert `hub.next_deadline()` is either the awaiter deadline or, if the
    upstream contract intentionally excludes it, that the external adapter uses
    `EventBus::next_awaiter_deadline()` separately;
-3. drive the loop with no queued event and assert the awaiter expires before a
-   larger idle cap.
+3. drive the external loop with no queued event and assert the awaiter expires
+   at its deadline; repeat through managed `run()`/`start()` after the upstream
+   correction.
 
-Until upstream clarifies or fixes this, external mode must aggregate the bus
-deadline explicitly and managed mode must use a bounded wake-up cap. No
-`event-hub-cpp` change is included in this repository.
+Until upstream clarifies or fixes this, no managed awaiter-timeout guarantee is
+made. No `event-hub-cpp` change is included in this repository.
+
+#### Upstream corrective proposal (not implemented here)
+
+In `event-hub-cpp`, aggregate `EventBus::next_awaiter_deadline()` in
+`ModuleHub::next_deadline()` and cover both `run()` and `start()` with a
+deterministic timeout-only awaiter test: no queued event and no other deadline,
+then assert timeout delivery and bounded shutdown/join. Add an external
+`process_once()` case to verify the same deadline is exposed. This proposal is
+owned by the upstream repository and is a prerequisite for a managed timed-
+awaiter guarantee.
 
 ### kurlyk
 
@@ -70,9 +85,12 @@ deadline explicitly and managed mode must use a bounded wake-up cap. No
 | Cancellation and destruction | `HttpClient::~HttpClient()` calls blocking `cancel_requests()`; destructor warns it must not run on worker thread (`HttpClient.hpp:39-52`). `cancel_requests()` waits for a callback from a future (`:52-85`). | Keep client lifetime in the adapter lease; never destroy it from a kurlyk callback. | Add a deterministic destructor-on-worker negative test and bounded shutdown timeout. Blocking destruction cannot be hidden in bsky callbacks. | bsky adapter, M1c |
 | Rate limits and partitions | RAII `HttpRateLimitHandle` keeps entries alive; `HttpRateLimiter` supports general/specific handles, partition keys, sequential in-flight tokens, and release on completion (`http/HttpRequestManager/HttpRateLimiter.hpp:15-22`, `118-249`; `HttpClient.hpp:337-366`). | Reuse kurlyk rate limiting; do not duplicate token buckets in bsky. | Decide global vs per-account partition keys and test retry token release after cancellation/destruction. | bsky policy, M1d |
 | Retries and status policy | Request configuration has retry attempts/delay, timeout, connect timeout, redirects, and streaming (`http/data/HttpRequest.hpp:39-59`, `211-286`; `HttpClient.hpp:419-506`). | Keep transport retries in kurlyk; operation-specific retry safety remains in bsky. | Verify valid-status and XRPC error mapping before retry; side-effecting operations must not blindly retry. | bsky adapter, M1d |
-| Streaming | `HttpResponse` distinguishes final `ready` responses from intermediate `stream_chunk` responses and carries ordered body/status/error metadata (`http/data/HttpResponse.hpp:10-40`). | Thin adapter forwards chunks to a separate stream contract; no one-shot operation completion per chunk. | Test cancellation during streaming and terminal callback exactly once. | bsky adapter, later streaming milestone |
-| Headers and diagnostics | Headers are a case-insensitive unordered multimap (`utils/CaseInsensitiveMultimap.hpp:52-70`); response metadata includes status, headers, errors, retry attempt, and timing (`http/data/HttpResponse.hpp:17-32`). | Convert to bsky owned ordered header entries; preserve repeated-field order while adapting. | The upstream container itself does not promise wire order. Add repeated-header fixture and redaction tests. | bsky adapter, M1d |
-| WebSocket/reconnect | NetworkWorker also processes registered network managers (`NetworkWorker.hpp:105-121`); this audit did not establish a complete WebSocket reconnect/backpressure contract from the pinned headers. | Defer WebSocket adapter. | Need explicit reconnect, queue bound, close, and replay policy before M4. | defer, M4 |
+| Streaming | `HttpResponse` distinguishes final `ready` responses from intermediate `stream_chunk` responses and carries body/status/error metadata (`http/data/HttpResponse.hpp:10-40`). | Thin adapter forwards chunks to a separate stream contract; no one-shot operation completion per chunk. | Test cancellation during streaming and terminal callback exactly once. | bsky adapter, later streaming milestone |
+| Retry and status semantics | `HttpRequestHandler` increments `retry_attempt`, retries when there is a curl error or status outside `valid_statuses`, stops when `retry_attempt < retry_attempts` is false, and sets `ready=true` only for the final response (`http/HttpRequestManager/HttpRequestHandler.hpp:94-116`). A stream chunk sets `ready=false`, `stream_chunk=true`, and suppresses retry (`:207-232`). The pinned integration fixture sets `retry_attempts=3` and asserts two intermediate callbacks plus one final callback with `retry_attempt==3` (`tests/integration/http_retry_streaming_main.cpp:107-140`). | Verified behavior: in this handler `retry_attempts` is the total-attempt budget represented by the final `retry_attempt`; `valid_statuses` does not by itself suppress curl-error retry; and `ready` means final callback rather than HTTP success. bsky authorizes retries by operation policy. | Add bsky fixtures for curl error, invalid status, synthetic 451, cancellation 499, final `ready`, and intermediate chunk. Unsafe side effects disable automatic retry unless protocol idempotency is validated; `OutcomeUnknown` remains possible. | bsky adapter, M1d |
+| Synthetic status and group cancellation | Cancellation paths synthesize status `499` and mark the response ready (`http/HttpRequestManager/HttpRequestHandler.hpp:35-40`, `146-151`; `HttpBatchRequestHandler.hpp:29-30`, `54-55`, `96-97`). Timeout handling can produce status `451` (`HttpRequestHandler.hpp:75-82`). `HttpClient` cancels by group and blocks for callback delivery off the worker (`http/HttpClient.hpp:39-85`). | Map synthetic statuses to typed cancellation/transport outcomes, never to HTTP success. | Test group cancellation, destructor cleanup, worker-thread restriction, and post-admission single completion. | bsky adapter, M1d |
+| Global worker lifecycle | `NetworkWorker::get_instance()` returns a process-global singleton (`core/NetworkWorker.hpp:21-30`); startup registers HTTP/WebSocket managers and shutdown stops the singleton (`startup/runtime.hpp:12-39`). | One shared process-level worker lease; a bsky Client must not stop another Client's worker. | Multi-client lifetime test and explicit final-owner shutdown policy. | bsky adapter, M1d |
+| WebSocket reconnect and queue | `WebSocketClient` exposes reconnect, reconnect attempts/delay, idle timeout, request timeout, and maximum outbound send queue size (`websocket/WebSocketClient.hpp:41-75`, `361-410`). A zero send-queue limit means unbounded queue (`:405-407`). | Defer WebSocket integration to M4; reuse these knobs only behind a bsky replay/backpressure contract. | Test reconnect exhaustion, idle timeout, bounded send rejection, close ordering, replay/checkpoint, and gap outcomes. | bsky streams, M4 |
+| Headers and diagnostics | Headers are a case-insensitive unordered multimap (`utils/CaseInsensitiveMultimap.hpp:52-70`); response metadata includes status, headers, errors, retry attempt, and timing (`http/data/HttpResponse.hpp:17-32`). | Preserve names, values, and repeated-field multiplicity. Do **not** promise original global HTTP field-line order from this source. If wire order becomes required, add upstream raw-header capture or change the bsky contract in a separately reviewed ADR. | Add repeated `Set-Cookie` fixture without comma joining, plus redaction tests. | bsky adapter, M1d |
 | Auth helpers | `OAuthPkceClient` implements generic authorization-code/PKCE, token exchange and refresh (`http/auth/OAuthPkceClient.hpp:26-214`). | Reuse only as a low-level helper if needed; do not call it AT Protocol OAuth. | Missing PAR, issuer/metadata discovery, DPoP, scope and identity verification. Add no public OAuth claim. | defer, M4 |
 
 `future.get()` must not be used from an event-loop or kurlyk worker callback.
@@ -88,7 +106,7 @@ uncertain side effect are distinct outcomes even when kurlyk supplies one
 | ISO-8601 parsing | `parse_iso8601` documents 1–9 fractional digits (`text/time_parser.hpp:997-1011`), but `parse_fraction_to_ms()` rejects the fourth digit (`:556-584`, especially `:567-570`). Existing tests cover only `.789` (`tests/parse_iso8601_test.cpp:76-80`). | Reuse after a conformance gate; preserve source text in a Lexicon datetime wrapper. | Upstream corrective proposal: accept 1–9 digits, define precision/rounding, and add 1/3/6/9-digit valid plus >9 invalid tests. | upstream proposal + bsky wrapper, M1d |
 | DateTime and offsets | `DateTime` stores UTC milliseconds plus a fixed offset, parses and formats ISO-8601 (`datetime/DateTime.hpp:23-25`, `156-204`, `659-698`). | Thin adapter for calendar values; do not use millisecond storage as a lossless Lexicon representation. | A datetime round-trip must retain the original fractional precision/string when canonical record bytes depend on it. | bsky, M1d |
 | Named zones | `ZonedClock` resolves named zones/fixed offsets for a UTC instant and optionally uses NTP (`timezone/ZonedClock.hpp:25-30`, `159-186`). | Reuse for presentation/calendar scheduling only. | AT Protocol timestamps are protocol strings; timezone conversion must not rewrite record content silently. | bsky, M1d |
-| Monotonic deadlines | `TimerScheduler::TimerClock` is `std::chrono::steady_clock` (`timers/TimerScheduler.hpp:40-43`); timers can be manually processed or run on a worker (`:114-124`, `249-341`). | Use event-hub task deadlines for runtime; use Time Shield monotonic helpers only at an adapter boundary. | No second scheduler: test deadline conversion against one injected steady clock. | bsky/event-hub adapter, M1c |
+| Monotonic deadlines | `TimerScheduler::TimerClock` is `std::chrono::steady_clock` (`timers/TimerScheduler.hpp:40-43`); timers can be manually processed or run on a worker (`:114-124`, `249-341`). | Use event-hub task deadlines for runtime; use Time Shield monotonic helpers only at an adapter boundary. | No second scheduler: test deadline conversion with bounded real monotonic waits; injectable clock support is an optional upstream improvement. | bsky/event-hub adapter, M1c |
 | Calendar helpers | Calendar and timezone helpers are useful for user-facing schedules. | Defer to calendar milestone; do not couple operation timeout logic to wall time. | DST fold/gap and leap-second policy remain open. | bsky, later milestone |
 | NTP | The NTP service has process-lifetime singleton/shutdown behavior (`ntp/ntp_time_service.hpp:195-205`, `303-307`). | Do not include NTP in core or operation deadlines. | Requires an explicit clock-trust policy, network access, and shutdown owner. | defer |
 
@@ -101,6 +119,50 @@ precision (truncation must be documented) or gains a finer representation.
 The bsky adapter must retain the original Lexicon datetime string and use a
 parsed instant only for validation/comparison; it must not silently canonicalize
 record content through `DateTime::to_iso8601_ms()`.
+
+## Evidence classification and upstream permalinks
+
+The matrix separates observed upstream behavior from bsky guarantees. The
+following links are direct source permalinks at the audited SHAs; line ranges
+are intentionally included so a later dependency update cannot silently move a
+claim:
+
+| Classification | Evidence |
+| --- | --- |
+| Verified from source | [event-hub ModuleHub deadlines](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/module_hub.hpp#L243-L261), [event-hub managed run loop](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/module_hub.hpp#L427-L455), [event-hub external run-loop deadlines](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/run_loop.hpp#L224-L258), [event-hub task manager](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/task_manager.hpp#L610-L771) |
+| Verified from source | [kurlyk retry/status handler](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/http/HttpRequestManager/HttpRequestHandler.hpp#L75-L116), [kurlyk streaming callback](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/http/HttpRequestManager/HttpRequestHandler.hpp#L207-L232), [kurlyk WebSocket options](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/websocket/WebSocketClient.hpp#L361-L410), [kurlyk global worker](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/core/NetworkWorker.hpp#L21-L30) |
+| Source-backed test expectations | [kurlyk retry/streaming fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/http_retry_streaming_main.cpp#L107-L140), [kurlyk backpressure fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/backpressure_main.cpp#L45-L78), [kurlyk destructor cancellation fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/http_client_destructor_main.cpp#L68-L103), [kurlyk WebSocket queue fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/websocket_local_main.cpp#L64-L110) |
+| Verified from source | [Time Shield fractional parser](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/include/time_shield/text/time_parser.hpp#L556-L584), [Time Shield DateTime](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/include/time_shield/datetime/DateTime.hpp#L659-L698), [Time Shield parser fixture](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/tests/parse_iso8601_test.cpp#L76-L92), [Time Shield CMake](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/CMakeLists.txt#L12-L55) |
+| Verified by executed test | Repository link checker, link-checker regression test, and exact-head GitHub CI for this PR. These verify bsky documentation/build health only; they do not execute the detached upstream audit trees. |
+| Architectural inference | Ownership split, target topology, runtime leases, and milestone gates in this document and ADR-0004. |
+| Proposed implementation | Future runtime/adapter targets, CMake package integration, and conformance tests. |
+| Unresolved | Managed awaiter timeout before the upstream fix, injectable upstream clock, global wire-header order, and WebSocket replay semantics. |
+
+## Concrete dependency integration plan
+
+The implementation PR should use installed targets whenever possible:
+
+1. `bsky_cpp::runtime` finds `event-hub-cpp CONFIG REQUIRED` and links
+   `event-hub-cpp::event-hub-cpp`; its installed config calls
+   `find_dependency(event-hub-cpp CONFIG)` ([upstream target/export](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/CMakeLists.txt#L31-L43), [package config](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/cmake/event-hub-cppConfig.cmake.in#L1-L17)).
+2. `bsky_cpp::kurlyk_adapter` finds the pinned kurlyk package and exports its
+   `kurlyk::kurlyk`/package target transitively. Kurlyk's audited CMake minimum
+   is 3.21 and its package links curl, OpenSSL, Threads, Asio, and the selected
+   Simple-WebSocket backend ([CMake](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/CMakeLists.txt#L1-L3), [dependency setup](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/CMakeLists.txt#L37-L52), [export target](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/CMakeLists.txt#L119-L145)).
+3. If event-hub is configured with Time Shield, use the same installed
+   `TimeShield` target once. Its package exports `time_shield::time_shield` and
+   defaults NTP **ON** at the audited SHA ([target/options](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/CMakeLists.txt#L12-L30), [install/export](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/CMakeLists.txt#L37-L72)); bsky must set NTP `OFF` unless a reviewed feature explicitly needs it.
+4. Do not nest both a top-level Time Shield `add_subdirectory()` and the
+   event-hub copy. Event-hub currently adds its configured Time Shield path and
+   uses `FORCE` for NTP/examples/tests ([upstream options](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/CMakeLists.txt#L45-L78)).
+   The integration must choose one package/source path and isolate these cache
+   options in a preset.
+5. Keep submodules flat and pinned under `external/<dependency>/`, initialized
+   non-recursively by default. Core installation/export remains independent;
+   optional component configs declare every transitive `find_dependency()`.
+
+This plan is actionable for the implementation PR but deliberately does not
+change this repository's CMake or add dependencies in Stage 2.
 
 ## Cross-cutting ownership and unresolved questions
 
@@ -127,17 +189,35 @@ record content through `DateTime::to_iso8601_ms()`.
 - Which exact AT Protocol OAuth profile and upstream fixture version will gate
   M4 authentication?
 
-## Required conformance matrix for M1c
+## Milestone-scoped conformance gates
 
-Before adopting any optional dependency, add deterministic tests for:
+The pinned scheduler has no injectable clock. Therefore M1c uses fake execution
+for operation state and bounded real-clock integration for scheduler behavior;
+it does not require unsupported virtual time.
 
-1. managed and external execution with one injected fake clock;
-2. notifier wake-up and every deadline source (tasks, awaiters, transport);
-3. admission rejection versus post-admission terminal rejection;
-4. cancellation/completion first-winner behavior and callback suppression;
-5. queue limits, rate-limit partition isolation, and retry token release;
-6. client destruction without use-after-free or worker-thread blocking;
-7. repeated response-header order and diagnostic redaction;
-8. 1–9 digit datetime fixtures and exact Lexicon string round-trip.
+### M1c — Operation Runtime
 
-No item in this matrix is implemented by this audit.
+1. managed/external composition and notifier wake-up; managed timed awaiters are
+   gated on the upstream deadline correction;
+2. bounded operation admission and synchronous rejection before admission;
+3. exactly-one terminal outcome and cancellation/completion first-winner;
+4. callback closure/suppression, move-only callbacks, executor rejection, and
+   quiescence;
+5. client shutdown, lifetime leases, destruction safety, and exception
+   containment;
+6. deterministic fake executor/transport race tests, plus bounded real-clock
+   scheduler integration tests without tight sleeps or unbounded polling.
+
+### M1d — Native Transport/XRPC Integration
+
+Kurlyk completion forwarding, status/error mapping, retry/idempotency policy,
+rate-limit partitions and token release, cancellation, repeated-header
+multiplicity (including `Set-Cookie` without comma joining), XRPC codecs, and
+Lexicon datetime validation/string preservation belong here.
+
+### M4 — Advanced Infrastructure
+
+WebSocket reconnect and outbound bounds, Jetstream replay/checkpoints/gaps,
+persistence/recovery, OAuth, and streaming backpressure belong here.
+
+No item in these matrices is implemented by this audit.

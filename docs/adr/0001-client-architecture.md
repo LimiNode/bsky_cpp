@@ -1,7 +1,8 @@
 # ADR-0001: Client architecture and optional infrastructure
 
 - **Status:** Accepted for D0; async execution details are refined by
-  [ADR-0002](0002-async-execution-contract.md).
+  [ADR-0002](0002-async-execution-contract.md) and runtime dependency
+  composition by [ADR-0004](0004-runtime-composition.md).
 - **Date:** 2026-10-25
 
 ## Context
@@ -16,8 +17,10 @@ implementations but must not dictate high-level DTOs.
 
 Build a C++17, async-first client with separate high-level domain and low-level
 XRPC APIs. Inject transport, execution, credentials, clocks, and persistence.
-Use kurlyk as the recommended transport adapter; keep event-hub-cpp and MDBX
-optional. Keep AI/LLM logic outside the SDK. Treat network calls as fallible
+Use kurlyk as the preferred replaceable transport adapter. Keep foundation/value
+primitives portable; the production async Client runtime is event-hub-cpp-backed,
+while MDBX, application-level streams, and other integrations remain optional.
+Keep AI/LLM logic outside the SDK. Treat network calls as fallible
 operations and durable application operations as explicit state machines rather
 than pretending multi-step publication is atomic.
 
@@ -26,9 +29,10 @@ than pretending multi-step publication is atomic.
 Async-first prevents hidden blocking in event-driven applications and makes
 cancellation, rate limits, backpressure, and bounded concurrency explicit. A
 high-level API is ergonomic for common operations while low-level XRPC preserves
-coverage for new Lexicons. Optional integrations keep the core portable and
-testable. A transport adapter isolates wire concerns and prevents dependency
-types from leaking into stable DTOs. Excluding AI logic keeps the SDK reusable,
+coverage for new Lexicons. Foundation/runtime separation keeps the core portable
+and testable while giving the production Client one coherent scheduler. A
+transport adapter isolates wire concerns and prevents dependency types from
+leaking into stable DTOs. Excluding AI logic keeps the SDK reusable,
 auditable, and protocol-focused.
 
 ## Consequences

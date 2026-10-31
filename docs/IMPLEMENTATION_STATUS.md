@@ -54,8 +54,9 @@ A document, example, or roadmap item is not evidence of an implementation.
 
 ## Deferred
 
-- Network integrations, generated Lexicon classes, event-hub-cpp/MDBX adapters,
-  full async callback/executor machinery, and AI/LLM logic.
+- Network integrations, generated Lexicon classes, the event-hub-cpp-backed
+  production runtime, kurlyk/MDBX adapters, full async callback/executor
+  machinery, and AI/LLM logic.
 
 ## Evidence rule
 
