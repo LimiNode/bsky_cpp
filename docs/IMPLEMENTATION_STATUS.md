@@ -30,6 +30,10 @@ A document, example, or roadmap item is not evidence of an implementation.
 - M0 is complete as scoped: M0a/M0b are implemented and M0c is an accepted
   documentation-only async contract. M1c async executor, callback, and
   operation machinery remain deferred.
+- Stage 2 dependency reuse audit is documentation-only: exact upstream source
+  snapshots, ownership decisions, and an M1c conformance gate are recorded in
+  [`DEPENDENCY_REUSE_AUDIT.md`](research/DEPENDENCY_REUSE_AUDIT.md) and
+  ADR-0004. No optional dependency is installed or integrated by this stage.
 
 ## Contract-only
 
