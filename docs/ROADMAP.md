@@ -87,6 +87,40 @@ invariant or contract from an earlier one.
 - **Deferred:** async operation admission/execution (M1c), XRPC encoding and
   protocol mapping (M1d), identity resolution, and network adapters.
 
+### M1c — Operation runtime (planned)
+
+- **Prerequisites:** M1b, ADR-0002, ADR-0004, and the event-hub-cpp managed
+  awaiter-deadline correction or an explicitly documented managed-mode limit.
+- **Scope:** event-hub-cpp-backed managed and external execution composition,
+  bounded operation admission, exactly-one terminal outcome, cancellation and
+  completion races, callback registration/quiescence, move-only callbacks,
+  executor rejection, shutdown, lifetime leases, exception containment, and
+  deterministic fake executor/transport tests.
+- **Acceptance:** foundation still builds without optional dependencies;
+  production runtime target has an explicit event-hub dependency; no parallel
+  TaskManager/EventBus/network worker is implemented; all ADR-0002 guarantees
+  are covered by deterministic tests.
+- **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
+  rate-limit partitions, header conversion, Lexicon datetime integration,
+  WebSocket, replay, persistence, and OAuth.
+
+### M1d — Native transport/XRPC integration (planned)
+
+- **Prerequisites:** M1c and a reviewed kurlyk adapter boundary.
+- **Scope:** native completion forwarding, status/XRPC error mapping, operation
+  retry/idempotency policy, rate-limit partitions/token release, response header
+  conversion, transport cancellation, XRPC encoding/decoding, and timestamp
+  validation with Lexicon string preservation.
+- **Acceptance:** installed consumer and dependency export checks pass with
+  pinned, non-duplicated dependencies and explicit transitive `find_dependency()`
+  requirements.
+
+### M4 advanced infrastructure gates
+
+WebSocket reconnect, Jetstream replay/checkpoints/gaps, persistent recovery,
+AT Protocol OAuth, streaming backpressure, and network-specific reconciliation
+remain M4 gates. They must not block the deterministic M1c operation runtime.
+
 ## M1 — AT Protocol Foundation
 
 - **Prerequisites:** M0c; current XRPC/Lexicon specifications pinned for

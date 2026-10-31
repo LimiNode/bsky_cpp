@@ -19,8 +19,10 @@ surface. Open questions must remain explicitly marked as open questions.
 
 - The core is C++17 and transport-neutral. `kurlyk` is the recommended adapter,
   not a type leaked through high-level DTOs.
-- `event-hub-cpp` and MDBX are optional integrations. The core must build and
-  operate without either one.
+- Foundation/value primitives must build and operate without optional
+  integrations. The future production async `Client` runtime is intentionally
+  event-hub-cpp-backed; application-level streams and MDBX persistence remain
+  optional integrations.
 - Never claim an operation is implemented because a conceptual snippet or a
   document exists. Update implementation status with evidence.
 - If implementation behavior must differ, update the contract and ADR/status in
@@ -48,10 +50,10 @@ surface. Open questions must remain explicitly marked as open questions.
 - Do not initialize submodules recursively by default. Nested/transitive
   submodules require a documented technical exception, and compatible shared
   dependencies should be reused rather than duplicated.
-- The core must configure, build, and test without initialized optional
-  dependencies.
-- Keep the core target independent of optional transport, event, and persistence
-  integrations.
+- The foundation target must configure, build, and test without initialized
+  optional dependencies. A future runtime/client component may require the
+  reviewed event-hub-cpp package, while transport and persistence adapters stay
+  replaceable or optional at their own boundaries.
 
 ## Documentation and review workflow
 
