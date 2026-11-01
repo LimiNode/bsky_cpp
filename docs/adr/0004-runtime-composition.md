@@ -10,9 +10,10 @@ Stage 2 audited exact upstream snapshots of `event-hub-cpp`, `kurlyk`, and
 `time-shield-cpp`. The foundation/value layer must remain dependency-independent,
 but a production asynchronous Client needs one coherent scheduler, event
 orchestration policy, and operation state machine. The accepted direction is to
-use `event-hub-cpp` as the required runtime infrastructure for that production
-Client, while keeping network, persistence, and application-level streams behind
-replaceable or optional components.
+use `event-hub-cpp` as the required infrastructure of the production operation
+runtime, while keeping the high-level Client transport-neutral and network,
+persistence, and application-level streams behind replaceable or optional
+components.
 
 This document is architectural policy, not implementation evidence. No runtime
 target, dependency, or M1c executor exists in this repository yet.
@@ -27,15 +28,25 @@ The future package topology is intentionally explicit:
 | --- | --- | --- | --- |
 | Foundation | `bsky_cpp::bsky_cpp` | Current value/protocol/transport-neutral primitives | Default component; no optional dependency |
 | Production runtime | `bsky_cpp::runtime` | Requires `event-hub-cpp::event-hub-cpp` and Threads; owns scheduling/orchestration composition | Opt-in component; installed config calls `find_dependency(event-hub-cpp CONFIG)` |
-| Client + native transport adapter | `bsky_cpp::kurlyk_adapter` | Requires runtime and the pinned kurlyk package; forwards native completion without exposing kurlyk DTOs | Opt-in adapter component; exported transitive dependencies are explicit |
+| High-level Client API | provisional `bsky_cpp::client` | Requires the production runtime and an abstract async transport; no concrete network backend | Installable without kurlyk when another compatible transport is selected |
+| Kurlyk transport adapter | provisional `bsky_cpp::kurlyk_adapter` | Concrete backend for the runtime; requires the pinned kurlyk package and forwards native completion without exposing kurlyk DTOs | Opt-in adapter component; only this component discovers/exports kurlyk |
+| Other transport adapters | future transport-specific targets | Implement the same abstract async transport seam without changing Client | Independent opt-in components |
 | Streams | future `bsky_cpp::streams` | Optional HTTP/WebSocket source and bsky replay/backpressure contract | Opt-in; not required by one-shot Client operations |
 | Persistence | future `bsky_cpp::persistence` | Optional MDBX-backed storage | Opt-in |
 
 The foundation target continues to configure, build, install, and test without
-initialized submodules. The runtime target is the one place where
-`event-hub-cpp` becomes mandatory for the production async Client. Application
-event subscriptions are not the same as runtime infrastructure and remain
-optional at the public API boundary.
+initialized submodules. Dependency direction is one-way: foundation has no
+runtime or network dependency; runtime depends on `event-hub-cpp`; the
+transport-neutral Client depends on runtime plus the abstract transport seam;
+each concrete adapter depends on the Client/runtime seam and only its own
+backend. The runtime target is the one place where `event-hub-cpp` becomes
+mandatory for production operation execution. Application event subscriptions
+are not the same as runtime infrastructure and remain optional at the public
+API boundary.
+
+`find_dependency(kurlyk CONFIG)` belongs only in the installed kurlyk adapter
+component. The common SDK package and a Client built with another compatible
+transport must not require kurlyk.
 
 The implementation PR must prefer installed package targets over nested
 `add_subdirectory()` calls. If source composition is unavoidable, it must add
@@ -53,22 +64,27 @@ The production runtime supports two modes over the same event-hub primitives:
 
 - **Managed:** the runtime owns an event-hub `ModuleHub` lifetime lease and
   starts/stops it according to an explicit policy. Upstream modules own their
-  task managers and private workers. This mode is not considered conforming for
-  timed awaiters until the upstream deadline correction described below lands.
+  task managers and private workers. Managed task execution may be used with a
+  documented limitation: timed awaiter delivery, timeout-driven cleanup, and
+  shutdown wake-up are not guaranteed until the complete upstream correction
+  below lands.
 - **External:** the caller owns the loop. The runtime installs a non-owning
   notifier, calls `process_once()`, and explicitly aggregates module task,
   EventBus awaiter, and transport deadlines. It must not create a parallel
   TaskManager, EventBus, or client run loop.
 
 The pinned `ModuleHub::next_deadline()` does not aggregate
-`EventBus::next_awaiter_deadline()`. `ModuleHub::run_loop()` can therefore wait
-forever when the only pending work is an awaiter timeout. The current public API
-does not expose a configurable managed polling cap. Consequently:
+`EventBus::next_awaiter_deadline()`, and `EventBus::register_awaiter()` does not
+notify the loop after inserting an awaiter. `ModuleHub::run_loop()` can
+therefore wait forever when the only pending work is an awaiter timeout, or
+remain asleep when another thread registers a newly earlier timeout after the
+loop has started waiting. The current public API does not expose a configurable
+managed polling cap. Consequently:
 
 - external mode must aggregate the bus awaiter deadline itself;
-- managed mode must require an upstream event-hub correction before promising
-  awaiter timeout delivery, shutdown wake-up, or timeout-driven lifetime
-  cleanup; and
+- managed mode may execute ordinary tasks with this limitation, but must require
+  the complete upstream event-hub correction before promising awaiter timeout
+  delivery, shutdown wake-up, or timeout-driven lifetime cleanup; and
 - this ADR does not claim that `ModuleHub::start()` or `run()` supports a local
   polling-cap workaround.
 
@@ -113,6 +129,13 @@ Kurlyk owns wire retries, rate-limit handles, sequential tokens, and partition
 state. bsky owns XRPC mapping, retry safety, and the meaning of terminal
 outcomes; it must not build a second token bucket.
 
+Synthetic transport statuses are diagnostic signals, not protocol success:
+`CURLE_OPERATION_TIMEDOUT` and explicit cancellation may surface as `499`, while
+other curl errors without an HTTP status may surface as `451`. A future adapter
+must inspect `HttpResponse::error_code`, cancellation state, and transport
+completion context; HTTP status alone is insufficient to classify the outcome.
+M1d conformance must cover these mappings separately.
+
 ### Clock and test policy
 
 The pinned event-hub TaskManager and EventAwaiter call
@@ -130,14 +153,25 @@ or unbounded polling.
 
 ## Upstream corrective proposals
 
-### event-hub-cpp: awaiter deadline aggregation
+### event-hub-cpp: awaiter deadline aggregation and wake-up
 
-At the pinned SHA, add `EventBus::next_awaiter_deadline()` to the aggregation
-used by `ModuleHub::next_deadline()` and cover both `run()` and `start()` with a
-deterministic regression test: register a timeout-only awaiter, enqueue no
-events and no other deadlines, then assert the timeout fires and shutdown
-wakes/joins within a bounded deadline. Add an external `process_once()` case to
-confirm the same deadline is exposed. This proposal belongs in the upstream
+At the pinned SHA, the upstream correction must:
+
+1. aggregate queued/compatible `EventBus::next_awaiter_deadline()` values in
+   `ModuleHub::next_deadline()`;
+2. notify the loop when `EventBus::register_awaiter()` adds new waiting work,
+   when its deadline is earlier than the current one, or when the loop was
+   previously waiting with no deadline;
+3. perform that notification after releasing `m_awaiters_mutex` (the notifier
+   must never be called while that mutex is held), preserving lock ordering;
+4. cover an awaiter registered before loop start and one registered after the
+   loop has entered its wait state;
+5. add deterministic tests for `ModuleHub::start()`, blocking `run()`, and an
+   external notifier-driven `process_once()` loop;
+6. assert bounded shutdown/join and no lost wake-ups in every scenario.
+
+Tests should use handshakes/barriers and bounded deadlines rather than tight
+sleeps or iteration-count polling. This proposal belongs in the upstream
 repository; PR #9 does not modify it.
 
 ### time-shield-cpp: fractional-second contract
@@ -153,8 +187,10 @@ through a lossy millisecond formatter.
 
 ### M1c — Operation Runtime
 
-Required: managed/external composition (with the managed awaiter limitation
-resolved), bounded operation admission, synchronous pre-admission rejection,
+Required: managed/external composition (managed task execution may ship with
+the documented awaiter limitation; guaranteed managed timed awaiters require
+the upstream correction), bounded operation admission, synchronous
+pre-admission rejection,
 exactly-one terminal outcome, cancellation/completion first-winner behavior,
 callback closure/suppression, move-only callbacks, post-admission executor
 rejection, shutdown/quiescence, lifetime leases, destruction safety, exception

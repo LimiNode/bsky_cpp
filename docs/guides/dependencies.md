@@ -28,13 +28,24 @@ Stage 2 records the intended target topology; it is not implemented yet:
 | --- | --- | --- | --- |
 | Foundation | `bsky_cpp::bsky_cpp` (current target) | none beyond the C++ standard library | installed by default; existing consumers remain dependency-free |
 | Runtime | future `bsky_cpp::runtime` | `event-hub-cpp::event-hub-cpp` and Threads | opt-in component; config package uses `find_dependency(event-hub-cpp CONFIG)` |
-| Client/transport adapter | future `bsky_cpp::kurlyk_adapter` | `bsky_cpp::runtime` plus `kurlyk::kurlyk` package and its exported transitive dependencies | opt-in adapter; never part of foundation DTOs |
+| High-level Client | provisional transport-neutral Client target | `bsky_cpp::runtime` plus the abstract async transport seam | installable without kurlyk when another compatible backend is selected |
+| Kurlyk adapter | future `bsky_cpp::kurlyk_adapter` | runtime/Client seam plus `kurlyk::kurlyk` and its exported transitive dependencies | opt-in concrete adapter; only this component discovers/exports kurlyk |
+| Other transport adapters | future backend-specific targets | same abstract async transport seam | independently selectable; no Client API change |
 | Streams | future optional stream component | selected HTTP/WebSocket adapter | installed only when selected; replay/backpressure contract remains bsky-owned |
 | Persistence | future optional component | MDBX adapter | installed only when selected |
+
+Dependency direction is one-way: foundation has no runtime/network dependency;
+runtime depends on event-hub-cpp; the high-level Client depends on runtime and an
+abstract transport; each concrete adapter depends on that seam and its own
+backend. The common SDK/foundation package must not call
+`find_dependency(kurlyk CONFIG)`. That call belongs only to the installed
+kurlyk adapter component, so a Client using another backend remains installable
+without kurlyk.
 
 The implementation PR must prefer installed package targets over nested
 `add_subdirectory()` calls. If source composition is unavoidable, it must add
 each pinned dependency once, never add a second physical Time Shield copy, set
 Time Shield NTP explicitly `OFF`, and isolate cache variables in a documented
 toolchain/preset. Installed config files must use `find_dependency()` for every
-transitive target they expose.
+transitive target they expose. PR #9 records this topology only; it does not
+implement any of these targets.
