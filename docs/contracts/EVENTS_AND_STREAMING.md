@@ -42,5 +42,8 @@ callback; callback quiescence follows the delivery/lifetime contract.
 
 ## Integration boundary
 
-WebSocket/HTTP stream implementations and event-hub-cpp adapters are optional.
-The core stream contract does not require a particular run loop.
+WebSocket/HTTP stream implementations and application-level event subscriptions
+are optional. The future production async Client uses the event-hub-cpp-backed
+runtime component for scheduling and event orchestration, but this stream
+contract does not require consumers to expose event-hub types or to use a
+particular stream adapter.

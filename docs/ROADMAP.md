@@ -87,6 +87,45 @@ invariant or contract from an earlier one.
 - **Deferred:** async operation admission/execution (M1c), XRPC encoding and
   protocol mapping (M1d), identity resolution, and network adapters.
 
+### M1c — Operation runtime (planned)
+
+- **Prerequisites:** M1b, ADR-0002, and ADR-0004. Managed task execution may
+  proceed with the explicitly documented event-hub awaiter limitation; the
+  upstream deadline-and-wake-up correction is required before claiming
+  guaranteed managed timed awaiters.
+- **Scope:** event-hub-cpp-backed managed and external execution composition,
+  bounded operation admission, exactly-one terminal outcome, cancellation and
+  completion races, callback registration/quiescence, move-only callbacks,
+  executor rejection, shutdown, lifetime leases, exception containment, and
+  deterministic fake executor/transport tests.
+- **Acceptance:** foundation still builds without optional dependencies;
+  production runtime target has an explicit event-hub dependency; a
+  transport-neutral high-level Client is separate from concrete network
+  adapters; no parallel TaskManager/EventBus/network worker is implemented;
+  all ADR-0002 guarantees that do not depend on the upstream awaiter fix are
+  covered by deterministic tests, with the managed limitation recorded in the
+  conformance report.
+- **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
+  rate-limit partitions, header conversion, Lexicon datetime integration,
+  WebSocket, replay, persistence, and OAuth.
+
+### M1d — Native transport/XRPC integration (planned)
+
+- **Prerequisites:** M1c and a reviewed kurlyk adapter boundary.
+- **Scope:** native completion forwarding, status/XRPC error mapping, operation
+  retry/idempotency policy, rate-limit partitions/token release, response header
+  conversion, transport cancellation, XRPC encoding/decoding, and timestamp
+  validation with Lexicon string preservation.
+- **Acceptance:** installed consumer and dependency export checks pass with
+  pinned, non-duplicated dependencies and explicit transitive `find_dependency()`
+  requirements.
+
+### M4 advanced infrastructure gates
+
+WebSocket reconnect, Jetstream replay/checkpoints/gaps, persistent recovery,
+AT Protocol OAuth, streaming backpressure, and network-specific reconciliation
+remain M4 gates. They must not block the deterministic M1c operation runtime.
+
 ## M1 — AT Protocol Foundation
 
 - **Prerequisites:** M0c; current XRPC/Lexicon specifications pinned for
@@ -128,7 +167,10 @@ invariant or contract from an earlier one.
 - **Prerequisites:** M1–M3 contracts and security review.
 - **Deliverables:** AT Protocol OAuth (PAR, PKCE, DPoP, scopes, refresh),
   Jetstream/stream source, optional persistence, durable operation journal and
-  outbox recovery, and event-hub integration.
+  outbox recovery, optional application-level event subscriptions/streams and
+  replay adapters, and advanced infrastructure around the M1c runtime. The
+  mandatory event-hub-backed operation runtime is introduced in M1c, not first
+  in M4.
 - **Acceptance:** identity verification, replay/checkpoint semantics,
   cursor-expiry/gap outcomes, backpressure, restart-safe reconciliation when a
   durable backend is configured, graceful shutdown, and no mandatory optional
