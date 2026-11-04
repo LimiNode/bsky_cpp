@@ -24,12 +24,16 @@ A document, example, or roadmap item is not evidence of an implementation.
   include and an optional Doxygen documentation target. The public-header
   allowlist generates installation, Doxygen input, and compile-only API checks;
   CI runs the documentation target with warnings treated as errors.
-- M1c operation runtime: optional event-hub-backed managed/external execution,
-  bounded admission, cancellation/completion arbitration, callback
-  quiescence, and bounded shutdown in [`runtime/runtime.hpp`](../src/bsky_cpp/runtime/runtime.hpp),
-  with integration tests and install/export coverage when `BSKY_BUILD_RUNTIME=ON`.
 
 ## Partial
+
+- Draft M1c non-blocking void-operation runtime is implemented and tested in
+  [`runtime.cpp`](../src/bsky_cpp/runtime/runtime.cpp) and
+  [`tests/runtime.cpp`](../tests/runtime.cpp). Admission/stop serialization,
+  first-winner outcomes, callback capture quiescence, bounded capacity,
+  self-destruction, and component-isolated exports are covered. See the
+  [runtime contract](contracts/OPERATION_RUNTIME.md) for exact guarantees and
+  remaining gates. Full M1c is not yet complete or independently approved.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
   accepted documentation contract. Managed timed awaiter guarantees in M1c
@@ -43,10 +47,8 @@ A document, example, or roadmap item is not evidence of an implementation.
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
-- The M0c async vocabulary and optional future-adapter boundary remain
-  contract-only. M1c implements the callback-first operation runtime in the
-  opt-in `bsky_cpp::runtime` target; guaranteed managed awaiter timeout
-  delivery remains gated by the upstream event-hub correction.
+- Typed result operations, the injected public executor, blocking-transport
+  bridge, operation deadlines, and optional future adapter remain contract-only.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
   events/streaming, delivery/lifetime, and persistence seams.
 - DID/handle resolution and endpoint discovery remain contract-only; M1a only

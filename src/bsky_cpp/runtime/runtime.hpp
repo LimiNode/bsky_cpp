@@ -6,7 +6,7 @@
 #include "bsky_cpp/core/cancellation.hpp"
 #include "bsky_cpp/core/result.hpp"
 
-#include <event_hub/task.hpp>
+#include <event_hub/notifier.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -24,6 +24,7 @@ namespace bsky_cpp::runtime {
 namespace detail {
 struct OperationState;
 struct RuntimeCore;
+struct RuntimeTestAccess;
 }
 
 /// A C++17 move-only callable used for operation work and callbacks.
@@ -45,7 +46,9 @@ public:
     template <typename Callable,
               typename = typename std::enable_if<
                   !std::is_same<typename std::decay<Callable>::type,
-                                MoveOnlyFunction>::value>::type>
+                                MoveOnlyFunction>::value &&
+                  std::is_invocable_r<Return, typename std::decay<Callable>::type&,
+                                      Arguments...>::value>::type>
     MoveOnlyFunction(Callable&& callable)
         : m_target(std::make_unique<Model<typename std::decay<Callable>::type>>(
               std::forward<Callable>(callable))) {}
@@ -72,6 +75,7 @@ public:
     /// \param arguments Arguments forwarded to the target.
     /// \return The target's return value.
     Return operator()(Arguments... arguments) {
+        if (!m_target) throw std::bad_function_call();
         return m_target->invoke(std::forward<Arguments>(arguments)...);
     }
 
@@ -106,8 +110,12 @@ enum class RuntimeMode {
 struct RuntimeOptions {
     /// Execution mode.
     RuntimeMode mode = RuntimeMode::Managed;
-    /// Maximum number of admitted, not-yet-terminal operations.
+    /// Maximum admitted operations through work and callback quiescence.
+    /// Zero is invalid and makes start() fail with InvalidArgument.
     std::size_t max_in_flight = 64U;
+    /// Optional external-loop notifier lease. notify() must be non-blocking
+    /// and must not reenter the runtime. Ignored by managed execution.
+    std::shared_ptr<event_hub::INotifier> notifier;
 };
 
 class OperationHandle;
@@ -154,6 +162,14 @@ public:
     /// \return `true` when completion was recorded.
     bool is_completed() const noexcept;
 
+    /// Observes terminal failure classification without copying the payload.
+    /// \return Failure category, or no value before completion/on success.
+    std::optional<ErrorCategory> error_category() const noexcept;
+
+    /// Returns a separately retainable callback registration.
+    /// \return Registration sharing this operation's dispatch state.
+    CallbackRegistration callback_registration() const noexcept;
+
     /// Waits for terminal completion.
     /// \param timeout Maximum wait duration.
     /// \return `true` when completion was recorded before the timeout.
@@ -182,7 +198,14 @@ using OperationWork = MoveOnlyFunction<Result<void>(CancellationToken)>;
 /// One-shot terminal callback. The result is delivered at most once.
 using CompletionCallback = MoveOnlyFunction<void(Result<void>)>;
 
-/// Event-hub-cpp-backed operation runtime.
+/// Event-hub-cpp-backed operation runtime for non-blocking void work.
+/// Work/callback execution uses one managed hub thread or the external caller.
+/// submit(), stop, shutdown, and handles support concurrent calls. External
+/// processing has one consumer; overlapping/reentrant passes return Conflict.
+/// Object destruction/moving must not race access to that same Runtime object.
+/// Work, callbacks, notifier calls, and capture destructors must be short.
+/// No network I/O, blocking-transport bridge, future adapter, or operation
+/// deadlines are implemented here. Managed timed awaiters remain upstream-gated.
 class Runtime {
 public:
     /// Monotonic clock type used for runtime deadlines.
@@ -191,7 +214,7 @@ public:
     /// Constructs a runtime with the selected execution options.
     /// \param options Admission and lifecycle options.
     explicit Runtime(RuntimeOptions options = {});
-    /// Stops the runtime within its default bounded shutdown policy.
+    /// Initiates stop without waiting; shared execution state owns cleanup.
     ~Runtime();
 
     Runtime(const Runtime&) = delete;
@@ -199,18 +222,22 @@ public:
     /// Move-constructs a runtime.
     Runtime(Runtime&&) noexcept = default;
     /// Move-assigns a runtime.
+    /// \param other Runtime whose executor lease is transferred.
     /// \return This runtime after assignment.
-    Runtime& operator=(Runtime&&) noexcept = default;
+    Runtime& operator=(Runtime&& other) noexcept;
 
     /// Starts managed execution or initializes external execution.
     /// \return Success or a lifecycle error.
     Result<void> start();
 
     /// Processes one non-blocking external pass.
+    /// User work/callbacks execute on the caller; they must remain non-blocking.
     /// \return Number of processed work items, or a lifecycle error.
     Result<std::size_t> process_once();
 
     /// Returns the earliest runtime deadline, if one is currently known.
+    /// For external mode, ready work returns now; task and queued awaiter
+    /// deadlines are aggregated. Call from the external consumer between passes.
     /// \return Earliest deadline, if any.
     std::optional<TimePoint> next_deadline();
 
@@ -221,12 +248,15 @@ public:
     Result<OperationHandle> submit(OperationWork work,
                                    CompletionCallback callback = {});
 
-    /// Requests shutdown and wakes active loops. This does not wait.
+    /// Closes admission, suppresses queued callbacks, and records Shutdown for
+    /// unfinished operations. Running work/callbacks may finish; does not wait.
     void request_stop() noexcept;
 
-    /// Stops admission and waits for operation/callback quiescence up to the
-    /// supplied bound. A timeout returns `ErrorCategory::Shutdown` and leaves
-    /// shared operation state alive for later cleanup.
+    /// Stops admission and waits for work/callback quiescence and loop exit.
+    /// Queued work is aborted and queued callbacks suppressed. No user callback
+    /// is run by shutdown(). A timeout returns ErrorCategory::Shutdown with
+    /// quiescence pending; shared state owns later cleanup. A call from this
+    /// runtime's work/callback immediately reports pending without self-wait.
     /// \param timeout Maximum shutdown wait.
     /// \return Success or a shutdown error.
     Result<void> shutdown(std::chrono::milliseconds timeout =
@@ -238,6 +268,7 @@ public:
 
 private:
     std::shared_ptr<detail::RuntimeCore> m_core;
+    friend struct detail::RuntimeTestAccess;
 };
 
 }  // namespace bsky_cpp::runtime

@@ -3,9 +3,12 @@ project(bsky_cpp_consumer LANGUAGES CXX)
 
 include(CTest)
 
-find_package(bsky_cpp CONFIG REQUIRED)
-
 option(BSKY_CONSUMER_RUNTIME "Exercise the installed runtime target" OFF)
+if(BSKY_CONSUMER_RUNTIME)
+    find_package(bsky_cpp CONFIG REQUIRED COMPONENTS runtime)
+else()
+    find_package(bsky_cpp CONFIG REQUIRED)
+endif()
 
 add_executable(bsky_cpp_consumer main.cpp)
 target_compile_features(bsky_cpp_consumer PRIVATE cxx_std_17)

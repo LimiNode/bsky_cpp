@@ -1,504 +1,472 @@
 #include "bsky_cpp/runtime/runtime.hpp"
+#include "bsky_cpp/runtime/detail/runtime_test_access.hpp"
 
 #include <event_hub/module_hub.hpp>
 
-#include <algorithm>
-#include <exception>
-#include <string>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace bsky_cpp::runtime {
 namespace detail {
 
-struct AdmissionCounter {
-    std::atomic<std::size_t> value{0U};
+struct OperationState {
+    std::shared_ptr<RuntimeCore> core;
+    CancellationSource cancellation;
+    OperationWork work;
+    CompletionCallback callback;
+    std::optional<Result<void>> payload;
+    std::optional<ErrorCategory> error;
+    bool completed = false;
+    bool work_started = false;
+    bool work_done = false;
+    bool callback_closed = false;
+    bool callback_started = false;
+    bool callback_cleanup = false;
+    bool callback_done = false;
 };
 
-struct RuntimeCore;
+// Identifies reentrant lifecycle/wait calls from work, callbacks, and captures.
+thread_local RuntimeCore* executing_core = nullptr;
 
-struct OperationState {
-    mutable std::mutex mutex;
-    std::condition_variable condition;
-    CancellationSource cancellation;
-    std::optional<Result<void>> terminal;
-    CompletionCallback callback;
-    std::shared_ptr<AdmissionCounter> admission;
-    std::shared_ptr<RuntimeCore> core;
-    bool callback_closed = false;
-    bool callback_queued = false;
-    bool callback_started = false;
+struct ExecutionScope {
+    explicit ExecutionScope(RuntimeCore* core) : previous(executing_core) {
+        executing_core = core;
+    }
+    ~ExecutionScope() { executing_core = previous; }
+    RuntimeCore* previous;
 };
 
 class RuntimeModule final : public event_hub::Module {
 public:
-    explicit RuntimeModule(event_hub::EventBus& bus)
-        : Module(bus) {}
-
-    bool enqueue(event_hub::Task task) {
-        return tasks().post(std::move(task)) != 0U;
-    }
-
-    std::shared_ptr<RuntimeCore> lifetime_lease;
+    RuntimeModule(event_hub::EventBus& bus, RuntimeCore& core)
+        : Module(bus), m_core(core) {}
+private:
+    std::size_t on_process() override;
+    RuntimeCore& m_core;
 };
 
 struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
-    explicit RuntimeCore(RuntimeOptions runtime_options)
-        : options(runtime_options),
-          admission(std::make_shared<AdmissionCounter>()) {
-        if (options.max_in_flight == 0U) {
-            options.max_in_flight = 1U;
-        }
-        module = &hub.emplace_module<RuntimeModule>();
-    }
-
-    ~RuntimeCore() {
-        force_shutdown();
+    explicit RuntimeCore(RuntimeOptions value) : options(std::move(value)) {
+        module = &hub.emplace_module<RuntimeModule>(*this);
     }
 
     Result<void> start() {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex);
-        if (started) {
-            return Result<void>::failure(
-                Error(ErrorCategory::Conflict, "runtime already started", "runtime.start"));
+        std::unique_lock<std::mutex> lock(mutex);
+        if (started || stopping || options.max_in_flight == 0U) {
+            return Result<void>::failure(Error(
+                options.max_in_flight == 0U ? ErrorCategory::InvalidArgument
+                                            : ErrorCategory::Conflict,
+                "runtime cannot start", "runtime.start"));
         }
-
+        started = true;
         try {
-            if (options.mode == RuntimeMode::Managed) {
-                hub.start();
-            } else {
+            if (options.mode == RuntimeMode::External) {
+                hub.set_notifier(options.notifier.get());
                 hub.initialize();
+                ready = true;
+            } else {
+                // The sole managed thread runs the upstream loop. Using run()
+                // permits the last lease to end here without a self-join.
+                std::thread([self = shared_from_this()] {
+                    ExecutionScope scope(self.get());
+                    try { self->hub.run(); } catch (...) { self->stop(); }
+                    std::lock_guard<std::mutex> done(self->mutex);
+                    self->exited = true;
+                    self->condition.notify_all();
+                }).detach();
+                condition.wait(lock, [this] { return ready || exited; });
             }
-            started = true;
-            accepting.store(true, std::memory_order_release);
+            if (exited || stopping) {
+                return Result<void>::failure(Error(
+                    ErrorCategory::Shutdown, "runtime stopped during start", "runtime.start"));
+            }
+            accepting = true;
             return Result<void>::success();
         } catch (...) {
-            return Result<void>::failure(
-                Error(ErrorCategory::Internal, "runtime start failed", "runtime.start"));
+            stopping = true;
+            exited = true;
+            return Result<void>::failure(Error(
+                ErrorCategory::Internal, "runtime start failed", "runtime.start"));
         }
     }
 
+    void loop_pass() {
+        std::lock_guard<std::mutex> lock(mutex);
+        ready = true;
+        condition.notify_all();
+        if (stopping && operations.empty()) hub.request_stop();
+    }
+
     Result<std::size_t> process_once() {
-        if (!is_external_running()) {
-            return Result<std::size_t>::failure(
-                Error(ErrorCategory::Conflict,
-                      "runtime is not externally running",
-                      "runtime.process_once"));
+        if (executing_core == this) return Result<std::size_t>::failure(Error(
+            ErrorCategory::Conflict, "reentrant external consumer", "runtime.process_once"));
+        std::unique_lock<std::mutex> consumer(consumer_mutex, std::try_to_lock);
+        if (!consumer.owns_lock()) {
+            return Result<std::size_t>::failure(Error(
+                ErrorCategory::Conflict, "external consumer already active", "runtime.process_once"));
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (options.mode != RuntimeMode::External || !ready || exited) {
+                return Result<std::size_t>::failure(Error(
+                    ErrorCategory::Conflict, "runtime is not externally running", "runtime.process_once"));
+            }
+        }
+        ExecutionScope scope(this);
         try {
-            return Result<std::size_t>::success(hub.process_once());
+            const auto count = hub.process_once();
+            finalize_external();
+            return Result<std::size_t>::success(count);
         } catch (...) {
-            return Result<std::size_t>::failure(
-                Error(ErrorCategory::Internal,
-                      "runtime processing failed",
-                      "runtime.process_once"));
+            stop();
+            finalize_external();
+            return Result<std::size_t>::failure(Error(
+                ErrorCategory::Internal, "runtime processing failed", "runtime.process_once"));
         }
     }
 
     std::optional<Runtime::TimePoint> next_deadline() {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex);
-        if (!started) {
-            return std::nullopt;
-        }
-        return hub.next_deadline();
+        if (executing_core == this) return std::nullopt;
+        std::unique_lock<std::mutex> consumer(consumer_mutex, std::try_to_lock);
+        if (!consumer.owns_lock()) return std::nullopt;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (options.mode != RuntimeMode::External || !ready || exited) return std::nullopt;
+        if (hub.has_pending()) return std::chrono::steady_clock::now();
+        auto deadline = hub.next_deadline();
+        const auto awaiter = hub.bus().next_awaiter_deadline(event_hub::DispatchSource::queued);
+        if (awaiter && (!deadline || *awaiter < *deadline)) deadline = awaiter;
+        return deadline;
     }
 
-    Result<OperationHandle> submit(OperationWork work,
-                                   CompletionCallback callback) {
-        if (!work) {
-            return Result<OperationHandle>::failure(
-                Error(ErrorCategory::InvalidArgument,
-                      "operation work is empty",
-                      "runtime.submit"));
-        }
-        if (!accepting.load(std::memory_order_acquire)) {
-            return Result<OperationHandle>::failure(
-                Error(ErrorCategory::Shutdown,
-                      "runtime is not accepting operations",
-                      "runtime.submit"));
-        }
-
-        auto current = admission->value.load(std::memory_order_acquire);
-        for (;;) {
-            if (current >= options.max_in_flight) {
-                return Result<OperationHandle>::failure(
-                    Error(ErrorCategory::Backpressure,
-                          "operation admission limit reached",
-                          "runtime.submit"));
-            }
-            if (admission->value.compare_exchange_weak(
-                    current,
-                    current + 1U,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
-                break;
-            }
-        }
-
-        // Shutdown may race the admission check above. Do not create a new
-        // operation after admission has been closed.
-        if (!accepting.load(std::memory_order_acquire)) {
-            admission->value.fetch_sub(1U, std::memory_order_acq_rel);
-            return Result<OperationHandle>::failure(
-                Error(ErrorCategory::Shutdown,
-                      "runtime is not accepting operations",
-                      "runtime.submit"));
-        }
+    Result<OperationHandle> submit(OperationWork work, CompletionCallback callback) {
+        if (!work) return Result<OperationHandle>::failure(Error(
+            ErrorCategory::InvalidArgument, "operation work is empty", "runtime.submit"));
 
         auto state = std::make_shared<OperationState>();
-        state->admission = admission;
         state->core = shared_from_this();
+        state->work = std::move(work);
         state->callback = std::move(callback);
+        state->callback_done = !state->callback;
+        bool queued = false;
         {
-            std::lock_guard<std::mutex> lock(operations_mutex);
-            operations.emplace_back(state);
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!accepting) return Result<OperationHandle>::failure(Error(
+                ErrorCategory::Shutdown, "runtime is not accepting operations", "runtime.submit"));
+            if (operations.size() >= options.max_in_flight) {
+                return Result<OperationHandle>::failure(Error(
+                    ErrorCategory::Backpressure, "operation admission limit reached", "runtime.submit"));
+            }
+            // Registration and queue admission share the shutdown boundary.
+            operations.emplace(state.get(), state);
+            try {
+                queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
+                    if (auto live = weak.lock()) live->core->execute(live);
+                }) != 0U;
+            } catch (...) {
+                // Once registered, queue rejection is a terminal failure.
+            }
         }
-
-        const auto accepted = module->enqueue(event_hub::Task(
-            [state, work = std::move(work)]() mutable {
-                if (state->cancellation.token().is_cancellation_requested()) {
-                    complete(state,
-                             Result<void>::failure(Error(
-                                 ErrorCategory::Cancelled,
-                                 "operation cancelled",
-                                 "runtime.operation")));
-                    return;
-                }
-
-                Result<void> result;
-                try {
-                    result = work(state->cancellation.token());
-                } catch (...) {
-                    result = Result<void>::failure(Error(
-                        ErrorCategory::Internal,
-                        "operation work failed",
-                        "runtime.operation"));
-                }
-                complete(state, std::move(result));
-            }));
-
-        if (!accepted) {
-            admission->value.fetch_sub(1U, std::memory_order_acq_rel);
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->core.reset();
-            return Result<OperationHandle>::failure(
-                Error(ErrorCategory::Shutdown,
-                      "runtime queue rejected operation",
-                      "runtime.submit"));
+        if (!queued) {
+            complete(state, Result<void>::failure(Error(
+                ErrorCategory::Shutdown, "executor rejected admitted work", "runtime.dispatch")));
+            abandon_work(state);
         }
-
         return Result<OperationHandle>::success(OperationHandle(state));
     }
 
-    void request_stop() noexcept {
-        accepting.store(false, std::memory_order_release);
-        try {
-            hub.request_stop();
-        } catch (...) {
+    void execute(const std::shared_ptr<OperationState>& state) {
+        OperationWork work;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->work_started || state->work_done) return;
+            state->work_started = true;
+            work = std::move(state->work);
+        }
+        ExecutionScope scope(this);
+        if (!state->cancellation.token().is_cancellation_requested()) {
+            try { complete(state, work(state->cancellation.token())); }
+            catch (...) {
+                complete(state, Result<void>::failure(Error(
+                    ErrorCategory::Internal, "operation work threw", "runtime.operation")));
+            }
+        }
+        work.reset();
+        std::lock_guard<std::mutex> lock(mutex);
+        state->work_done = true;
+        retire(state);
+    }
+
+    void complete(const std::shared_ptr<OperationState>& state, Result<void> result) {
+        bool rejected = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->completed) return;
+            if (state->callback && !state->callback_closed) {
+                bool queued = false;
+                try {
+                    queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
+                        if (auto live = weak.lock()) live->core->deliver(live);
+                    }) != 0U;
+                } catch (...) {}
+                if (!queued) {
+                    result = Result<void>::failure(Error(
+                        ErrorCategory::Shutdown, "executor rejected terminal delivery", "runtime.dispatch"));
+                    rejected = true;
+                }
+            }
+            state->error = result ? std::nullopt : std::optional<ErrorCategory>(result.error().category());
+            state->payload.emplace(std::move(result));
+            state->completed = true;
+            retire(state);
+        }
+        if (rejected) close_callback(state);
+    }
+
+    void deliver(const std::shared_ptr<OperationState>& state) {
+        CompletionCallback callback;
+        std::optional<Result<void>> result;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->callback_closed || state->callback_done || state->callback_started) return;
+            state->callback_started = true;
+            callback = std::move(state->callback);
+            result.emplace(std::move(*state->payload));
+            state->payload.reset();
+        }
+        ExecutionScope scope(this);
+        try { callback(std::move(*result)); } catch (...) {}
+        callback.reset(); // Captures must be destroyed before reporting quiescence.
+        std::lock_guard<std::mutex> lock(mutex);
+        state->callback_started = false;
+        state->callback_done = true;
+        retire(state);
+    }
+
+    void close_callback(const std::shared_ptr<OperationState>& state) {
+        CompletionCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_closed = true;
+            if (state->callback_started || state->callback_cleanup || state->callback_done) return;
+            state->callback_cleanup = true;
+            callback = std::move(state->callback);
+        }
+        ExecutionScope scope(this);
+        callback.reset();
+        std::lock_guard<std::mutex> lock(mutex);
+        state->callback_cleanup = false;
+        state->callback_done = true;
+        retire(state);
+    }
+
+    void abandon_work(const std::shared_ptr<OperationState>& state) {
+        OperationWork work;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->work_started || state->work_done) return;
+            state->work_started = true;
+            work = std::move(state->work);
+        }
+        ExecutionScope scope(this);
+        work.reset();
+        std::lock_guard<std::mutex> lock(mutex);
+        state->work_done = true;
+        retire(state);
+    }
+
+    void cancel(const std::shared_ptr<OperationState>& state, ErrorCategory category) {
+        state->cancellation.request_cancellation();
+        complete(state, Result<void>::failure(Error(
+            category, "operation stopped", "runtime.operation")));
+        // Keep capacity until the queued work thunk is consumed, so repeated
+        // submit/cancel cannot turn the upstream queue into an unbounded one.
+    }
+
+    void stop() {
+        std::vector<std::shared_ptr<OperationState>> live;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            accepting = false;
+            stopping = true;
+            for (const auto& item : operations) live.push_back(item.second);
+        }
+        for (const auto& state : live) {
+            close_callback(state);
+            cancel(state, ErrorCategory::Shutdown);
+            abandon_work(state);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (ready && operations.empty()) hub.request_stop();
+            condition.notify_all();
+        }
+        if (options.mode == RuntimeMode::External && executing_core != this) {
+            std::unique_lock<std::mutex> consumer(consumer_mutex, std::try_to_lock);
+            if (consumer.owns_lock()) finalize_external();
         }
     }
 
     Result<void> shutdown(std::chrono::milliseconds timeout) {
-        accepting.store(false, std::memory_order_release);
-        cancel_operations();
-
         const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (!all_quiescent()) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                request_stop();
-                return Result<void>::failure(Error(
-                    ErrorCategory::Shutdown,
-                    "runtime quiescence deadline expired",
-                    "runtime.shutdown"));
-            }
-
-            if (options.mode == RuntimeMode::External) {
-                (void)process_once();
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        request_stop();
-        std::lock_guard<std::mutex> lock(lifecycle_mutex);
-        if (!started) {
-            module->lifetime_lease.reset();
-            return Result<void>::success();
-        }
-        try {
-            if (options.mode == RuntimeMode::Managed) {
-                hub.join();
-            } else {
-                hub.shutdown();
-            }
-            started = false;
-            module->lifetime_lease.reset();
-            return Result<void>::success();
-        } catch (...) {
-            return Result<void>::failure(Error(
-                ErrorCategory::Shutdown,
-                "runtime loop shutdown failed",
-                "runtime.shutdown"));
-        }
+        stop();
+        std::unique_lock<std::mutex> lock(mutex);
+        if (executing_core == this) return pending("quiescence is pending on the current invocation");
+        if (!condition.wait_until(lock, deadline, [this] {
+                return operations.empty() && (!started || exited);
+            })) return pending("shutdown deadline expired; quiescence is pending");
+        return Result<void>::success();
     }
 
-    bool accepting_now() const noexcept {
-        return accepting.load(std::memory_order_acquire);
+    static Result<void> pending(const char* message) {
+        return Result<void>::failure(Error(ErrorCategory::Shutdown, message, "runtime.shutdown"));
     }
 
-    bool is_external_running() const {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex);
-        return started && options.mode == RuntimeMode::External;
-    }
-
-    static void complete(const std::shared_ptr<OperationState>& state,
-                         Result<void> result) {
-        bool schedule_callback = false;
-        std::shared_ptr<RuntimeCore> core;
+    // Called only by the external single consumer, never by a producer.
+    void finalize_external() {
         {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (state->terminal.has_value()) {
-                return;
-            }
-            state->terminal.emplace(std::move(result));
-            if (state->admission) {
-                state->admission->value.fetch_sub(1U, std::memory_order_acq_rel);
-                state->admission.reset();
-            }
-            if (state->callback && !state->callback_closed) {
-                state->callback_queued = true;
-                schedule_callback = true;
-                core = state->core;
-            }
-            state->condition.notify_all();
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!stopping || exited || !operations.empty()) return;
         }
-
-        if (!schedule_callback || !core) {
-            return;
-        }
-
-        const auto accepted = core->module->enqueue(event_hub::Task(
-            [state] { deliver_callback(state); }));
-        if (!accepted) {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->callback_queued = false;
-            state->callback_closed = true;
-            state->callback.reset();
-            state->condition.notify_all();
-        }
+        hub.shutdown();
+        std::lock_guard<std::mutex> lock(mutex);
+        exited = true;
+        condition.notify_all();
     }
 
-    static void deliver_callback(const std::shared_ptr<OperationState>& state) {
-        CompletionCallback callback;
-        Result<void> result;
-        {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (state->callback_closed || !state->callback ||
-                !state->terminal.has_value()) {
-                state->callback_queued = false;
-                state->callback.reset();
-                state->condition.notify_all();
-                return;
-            }
-            state->callback_started = true;
-            state->callback_queued = false;
-            callback = std::move(state->callback);
-            result = *state->terminal;
-        }
-
-        try {
-            callback(std::move(result));
-        } catch (...) {
-            // Callback exceptions cannot create a second terminal outcome.
-        }
-
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->callback_started = false;
-        state->condition.notify_all();
-    }
-
-    static bool is_quiescent(const std::shared_ptr<OperationState>& state) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        return state->terminal.has_value() && !state->callback_queued &&
-               !state->callback_started;
-    }
-
-    void cancel_operations() {
-        std::vector<std::shared_ptr<OperationState>> live;
-        {
-            std::lock_guard<std::mutex> lock(operations_mutex);
-            for (const auto& weak : operations) {
-                if (auto state = weak.lock()) {
-                    live.push_back(std::move(state));
-                }
-            }
-        }
-        for (const auto& state : live) {
-            state->cancellation.request_cancellation();
-            complete(state,
-                     Result<void>::failure(Error(ErrorCategory::Cancelled,
-                                                  "operation cancelled",
-                                                  "runtime.shutdown")));
-        }
-    }
-
-    bool all_quiescent() {
-        std::lock_guard<std::mutex> lock(operations_mutex);
-        for (const auto& weak : operations) {
-            if (auto state = weak.lock()) {
-                if (!is_quiescent(state)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    void force_shutdown() noexcept {
-        try {
-            accepting.store(false, std::memory_order_release);
-            cancel_operations();
-            hub.request_stop();
-            std::lock_guard<std::mutex> lock(lifecycle_mutex);
-            if (!started) {
-                module->lifetime_lease.reset();
-                return;
-            }
-            if (options.mode == RuntimeMode::Managed) {
-                hub.join();
-            } else {
-                hub.shutdown();
-            }
-            started = false;
-            module->lifetime_lease.reset();
-        } catch (...) {
-        }
+    // The mutex is held by every caller. Erasure releases capacity and keeps
+    // the registry bounded even when observers retain completed handles.
+    void retire(const std::shared_ptr<OperationState>& state) {
+        if (state->completed && state->work_done && state->callback_done) operations.erase(state.get());
+        condition.notify_all();
     }
 
     RuntimeOptions options;
     event_hub::ModuleHub hub;
     RuntimeModule* module = nullptr;
-    std::shared_ptr<AdmissionCounter> admission;
-    std::atomic<bool> accepting{false};
-    mutable std::mutex lifecycle_mutex;
+    mutable std::mutex mutex;
+    std::condition_variable condition;
+    std::mutex consumer_mutex;
+    std::unordered_map<OperationState*, std::shared_ptr<OperationState>> operations;
     bool started = false;
-    std::mutex operations_mutex;
-    std::vector<std::weak_ptr<OperationState>> operations;
+    bool ready = false;
+    bool accepting = false;
+    bool stopping = false;
+    bool exited = false;
 };
 
-}  // namespace detail
+std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
+
+void RuntimeTestAccess::close_executor(Runtime& runtime) {
+    runtime.m_core->module->tasks().close();
+}
+
+std::size_t RuntimeTestAccess::registered_operations(Runtime& runtime) {
+    std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
+    return runtime.m_core->operations.size();
+}
+
+} // namespace detail
 
 void CallbackRegistration::close() noexcept {
-    if (!m_state) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(m_state->mutex);
-    m_state->callback_closed = true;
-    if (!m_state->callback_started) {
-        m_state->callback_queued = false;
-        m_state->callback.reset();
-    }
-    m_state->condition.notify_all();
+    if (m_state) m_state->core->close_callback(m_state);
 }
 
 bool CallbackRegistration::is_closed() const noexcept {
-    if (!m_state) {
-        return true;
-    }
-    std::lock_guard<std::mutex> lock(m_state->mutex);
+    if (!m_state) return true;
+    std::lock_guard<std::mutex> lock(m_state->core->mutex);
     return m_state->callback_closed;
 }
 
-bool CallbackRegistration::await_quiescence(
-    std::chrono::milliseconds timeout) const {
-    if (!m_state) {
-        return true;
-    }
-    std::unique_lock<std::mutex> lock(m_state->mutex);
-    return m_state->condition.wait_for(lock, timeout, [state = m_state] {
-        return !state->callback_queued && !state->callback_started;
-    });
+bool CallbackRegistration::await_quiescence(std::chrono::milliseconds timeout) const {
+    if (!m_state) return true;
+    auto core = m_state->core;
+    std::unique_lock<std::mutex> lock(core->mutex);
+    if (detail::executing_core == core.get()) return m_state->callback_done;
+    return core->condition.wait_for(lock, timeout, [this] { return m_state->callback_done; });
 }
 
 void OperationHandle::request_cancellation() noexcept {
-    if (!m_state) {
-        return;
-    }
-    m_state->cancellation.request_cancellation();
-    detail::RuntimeCore::complete(
-        m_state,
-        Result<void>::failure(Error(ErrorCategory::Cancelled,
-                                    "operation cancelled",
-                                    "runtime.operation")));
+    if (m_state) m_state->core->cancel(m_state, ErrorCategory::Cancelled);
 }
 
 bool OperationHandle::is_completed() const noexcept {
-    if (!m_state) {
-        return false;
-    }
-    std::lock_guard<std::mutex> lock(m_state->mutex);
-    return m_state->terminal.has_value();
+    if (!m_state) return false;
+    std::lock_guard<std::mutex> lock(m_state->core->mutex);
+    return m_state->completed;
 }
 
-bool OperationHandle::wait_for_completion(
-    std::chrono::milliseconds timeout) const {
-    if (!m_state) {
-        return false;
-    }
-    std::unique_lock<std::mutex> lock(m_state->mutex);
-    return m_state->condition.wait_for(lock, timeout, [state = m_state] {
-        return state->terminal.has_value();
-    });
+std::optional<ErrorCategory> OperationHandle::error_category() const noexcept {
+    if (!m_state) return std::nullopt;
+    std::lock_guard<std::mutex> lock(m_state->core->mutex);
+    return m_state->error;
 }
 
-void OperationHandle::close_callback() noexcept {
-    CallbackRegistration(m_state).close();
+bool OperationHandle::wait_for_completion(std::chrono::milliseconds timeout) const {
+    if (!m_state) return false;
+    auto core = m_state->core;
+    std::unique_lock<std::mutex> lock(core->mutex);
+    if (detail::executing_core == core.get()) return m_state->completed;
+    return core->condition.wait_for(lock, timeout, [this] { return m_state->completed; });
 }
 
-bool OperationHandle::await_callback_quiescence(
-    std::chrono::milliseconds timeout) const {
-    return CallbackRegistration(m_state).await_quiescence(timeout);
+CallbackRegistration OperationHandle::callback_registration() const noexcept {
+    return CallbackRegistration(m_state);
+}
+
+void OperationHandle::close_callback() noexcept { callback_registration().close(); }
+
+bool OperationHandle::await_callback_quiescence(std::chrono::milliseconds timeout) const {
+    return callback_registration().await_quiescence(timeout);
 }
 
 Runtime::Runtime(RuntimeOptions options)
-    : m_core(std::make_shared<detail::RuntimeCore>(options)) {
-    m_core->module->lifetime_lease = m_core;
-}
+    : m_core(std::make_shared<detail::RuntimeCore>(std::move(options))) {}
 
-Runtime::~Runtime() {
-    if (m_core) {
-        (void)m_core->shutdown(std::chrono::seconds(2));
-    }
+Runtime::~Runtime() { request_stop(); }
+
+Runtime& Runtime::operator=(Runtime&& other) noexcept {
+    if (this != &other) { request_stop(); m_core = std::move(other.m_core); }
+    return *this;
 }
 
 Result<void> Runtime::start() {
-    return m_core->start();
+    return m_core ? m_core->start() : detail::RuntimeCore::pending("empty runtime");
 }
 
 Result<std::size_t> Runtime::process_once() {
-    return m_core->process_once();
+    auto core = m_core;
+    return core ? core->process_once() : Result<std::size_t>::failure(Error(
+        ErrorCategory::Shutdown, "empty runtime", "runtime.process_once"));
 }
 
 std::optional<Runtime::TimePoint> Runtime::next_deadline() {
-    return m_core->next_deadline();
+    return m_core ? m_core->next_deadline() : std::nullopt;
 }
 
-Result<OperationHandle> Runtime::submit(OperationWork work,
-                                         CompletionCallback callback) {
-    return m_core->submit(std::move(work), std::move(callback));
+Result<OperationHandle> Runtime::submit(OperationWork work, CompletionCallback callback) {
+    auto core = m_core;
+    return core ? core->submit(std::move(work), std::move(callback))
+                : Result<OperationHandle>::failure(Error(
+                      ErrorCategory::Shutdown, "empty runtime", "runtime.submit"));
 }
 
 void Runtime::request_stop() noexcept {
-    if (m_core) {
-        m_core->request_stop();
-    }
+    auto core = m_core;
+    if (core) core->stop();
 }
 
 Result<void> Runtime::shutdown(std::chrono::milliseconds timeout) {
-    return m_core->shutdown(timeout);
+    auto core = m_core;
+    return core ? core->shutdown(timeout) : Result<void>::success();
 }
 
 bool Runtime::accepting() const noexcept {
-    return m_core != nullptr && m_core->accepting_now();
+    if (!m_core) return false;
+    std::lock_guard<std::mutex> lock(m_core->mutex);
+    return m_core->accepting;
 }
 
-}  // namespace bsky_cpp::runtime
+} // namespace bsky_cpp::runtime

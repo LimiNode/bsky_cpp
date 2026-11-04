@@ -2,9 +2,16 @@
 
 include(CMakeFindDependencyMacro)
 
-if(@BSKY_RUNTIME_ENABLED@)
-    find_dependency(event-hub-cpp CONFIG)
-endif()
-
 include("${CMAKE_CURRENT_LIST_DIR}/bsky_cppTargets.cmake")
+set(bsky_cpp_foundation_FOUND TRUE)
+foreach(component IN LISTS bsky_cpp_FIND_COMPONENTS)
+    if(component STREQUAL "runtime" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/bsky_cppRuntimeTargets.cmake")
+        find_dependency(Threads)
+        find_dependency(event-hub-cpp CONFIG)
+        include("${CMAKE_CURRENT_LIST_DIR}/bsky_cppRuntimeTargets.cmake")
+        set(bsky_cpp_runtime_FOUND TRUE)
+    elseif(NOT component STREQUAL "foundation")
+        set(bsky_cpp_${component}_FOUND FALSE)
+    endif()
+endforeach()
 check_required_components(bsky_cpp)

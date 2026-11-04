@@ -64,7 +64,11 @@ foreach(header IN LISTS BSKY_PUBLIC_HEADER_NAMES)
     target_compile_definitions("bsky_cpp_header_${header_target}" PRIVATE
         BSKY_HEADER="${header}"
     )
-    target_link_libraries("bsky_cpp_header_${header_target}" PRIVATE bsky_cpp::bsky_cpp)
+    if(header MATCHES "^bsky_cpp/runtime/")
+        target_link_libraries("bsky_cpp_header_${header_target}" PRIVATE bsky_cpp::runtime)
+    else()
+        target_link_libraries("bsky_cpp_header_${header_target}" PRIVATE bsky_cpp::bsky_cpp)
+    endif()
     bsky_cpp_enable_sanitizers("bsky_cpp_header_${header_target}")
     add_test(NAME "bsky_cpp.header.${header_target}"
         COMMAND "bsky_cpp_header_${header_target}")
@@ -78,12 +82,4 @@ if(BSKY_BUILD_RUNTIME)
     add_test(NAME bsky_cpp.runtime COMMAND bsky_cpp_runtime_test)
     set_tests_properties(bsky_cpp.runtime PROPERTIES TIMEOUT 10)
 
-    add_executable(bsky_cpp_runtime_header_self_containment header_self_containment.cpp)
-    target_compile_definitions(bsky_cpp_runtime_header_self_containment PRIVATE
-        BSKY_HEADER="bsky_cpp/runtime/runtime.hpp")
-    target_link_libraries(bsky_cpp_runtime_header_self_containment PRIVATE bsky_cpp::runtime)
-    bsky_cpp_enable_sanitizers(bsky_cpp_runtime_header_self_containment)
-    add_test(NAME bsky_cpp.header.runtime_runtime_hpp
-        COMMAND bsky_cpp_runtime_header_self_containment)
-    set_tests_properties(bsky_cpp.header.runtime_runtime_hpp PROPERTIES TIMEOUT 10)
 endif()

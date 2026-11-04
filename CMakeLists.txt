@@ -17,7 +17,7 @@ option(BSKY_BUILD_DOCUMENTATION "Build bsky_cpp Doxygen documentation" OFF)
 option(BSKY_BUILD_RUNTIME "Build the optional event-hub-backed operation runtime" OFF)
 
 # Explicit install surface; add public .ipp/.tpp fragments here when needed.
-set(BSKY_PUBLIC_HEADERS
+set(BSKY_FOUNDATION_PUBLIC_HEADERS
     src/bsky_cpp.hpp
     src/bsky_cpp/core/bsky_error.hpp
     src/bsky_cpp/core/cancellation.hpp
@@ -30,6 +30,10 @@ set(BSKY_PUBLIC_HEADERS
 set(BSKY_RUNTIME_PUBLIC_HEADERS
     src/bsky_cpp/runtime/runtime.hpp
 )
+set(BSKY_PUBLIC_HEADERS ${BSKY_FOUNDATION_PUBLIC_HEADERS})
+if(BSKY_BUILD_RUNTIME)
+    list(APPEND BSKY_PUBLIC_HEADERS ${BSKY_RUNTIME_PUBLIC_HEADERS})
+endif()
 
 # Canonical public-header names, derived from the source allowlist. Every
 # install, documentation, and compile-only API check is generated from this
@@ -84,9 +88,27 @@ if(BSKY_ENABLE_SANITIZERS)
 endif()
 
 if(BSKY_BUILD_RUNTIME)
-    set(EVENT_HUB_CPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(EVENT_HUB_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory(external/event-hub-cpp ${CMAKE_CURRENT_BINARY_DIR}/external/event-hub-cpp)
+    # Prefer an existing/installed target. Source fallback composes the one
+    # pinned submodule with optional upstream integrations disabled locally.
+    function(bsky_cpp_find_event_hub)
+        if(TARGET event_hub::event_hub)
+            return()
+        endif()
+        find_package(event-hub-cpp CONFIG QUIET)
+        if(TARGET event_hub::event_hub)
+            return()
+        endif()
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/event-hub-cpp/CMakeLists.txt")
+            message(FATAL_ERROR "Install event-hub-cpp or run: git submodule update --init external/event-hub-cpp")
+        endif()
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        set(EVENT_HUB_CPP_BUILD_EXAMPLES OFF)
+        set(EVENT_HUB_CPP_BUILD_TESTS OFF)
+        set(EVENT_HUB_CPP_USE_TIME_SHIELD OFF)
+        set(EVENT_HUB_CPP_USE_TIME_SHIELD_NTP OFF)
+        add_subdirectory(external/event-hub-cpp ${CMAKE_CURRENT_BINARY_DIR}/external/event-hub-cpp)
+    endfunction()
+    bsky_cpp_find_event_hub()
 
     find_package(Threads REQUIRED)
     add_library(bsky_cpp_runtime STATIC
@@ -113,8 +135,6 @@ if(BSKY_BUILD_RUNTIME)
     endif()
 endif()
 
-set(BSKY_RUNTIME_ENABLED ${BSKY_BUILD_RUNTIME})
-
 if(BSKY_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
@@ -131,11 +151,6 @@ if(BSKY_BUILD_DOCUMENTATION)
     foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
         string(APPEND BSKY_DOXYGEN_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${header} ")
     endforeach()
-    if(BSKY_BUILD_RUNTIME)
-        foreach(header IN LISTS BSKY_RUNTIME_PUBLIC_HEADERS)
-            string(APPEND BSKY_DOXYGEN_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${header} ")
-        endforeach()
-    endif()
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Doxyfile.in"
         "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
@@ -165,13 +180,6 @@ foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
     endif()
     install(FILES "${header}" DESTINATION "${header_destination}")
 endforeach()
-if(BSKY_BUILD_RUNTIME)
-    foreach(header IN LISTS BSKY_RUNTIME_PUBLIC_HEADERS)
-        file(RELATIVE_PATH header_name "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
-        get_filename_component(header_directory "${header_name}" DIRECTORY)
-        install(FILES "${header}" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${header_directory}")
-    endforeach()
-endif()
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfigVersion.cmake"
@@ -185,10 +193,15 @@ configure_package_config_file(
 
 if(BSKY_BUILD_RUNTIME)
     install(TARGETS bsky_cpp_runtime
-        EXPORT bsky_cppTargets
+        EXPORT bsky_cppRuntimeTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    install(EXPORT bsky_cppRuntimeTargets
+        FILE bsky_cppRuntimeTargets.cmake
+        NAMESPACE bsky_cpp::
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/bsky_cpp"
     )
 endif()
 

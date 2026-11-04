@@ -41,8 +41,9 @@ integration is now implemented in `src/bsky_cpp/runtime/`.
 Managed mode means the production runtime owns a `ModuleHub` lifetime lease and
 calls `start()`/`run()` according to the selected thread policy. Ordinary task
 execution may proceed with a documented limitation, but managed timed awaiter
-delivery, timeout-driven cleanup, and shutdown wake-up are not guaranteed until
-the complete upstream deadline-and-wake-up correction lands.
+delivery and timeout-driven cleanup are not guaranteed until the complete
+upstream deadline-and-wake-up correction lands. Explicit
+`ModuleHub::request_stop()` already wakes local/external notifiers.
 External mode means the application owns the loop: the adapter installs a
 notifier, calls `process_once()`, and computes a wait from all task,
 event-awaiter, and transport deadlines. The adapter must not build a parallel
@@ -56,7 +57,7 @@ notifying the loop; a sleeping loop therefore needs a notifier wake-up when new
 work appears or a newly registered deadline becomes earlier. External mode must
 aggregate `EventBus::next_awaiter_deadline()` explicitly. Managed mode must
 require the complete upstream correction before promising timeout delivery,
-shutdown wake-up, or timeout-driven lifetime cleanup. The minimum deterministic
+or timeout-driven lifetime cleanup. The minimum deterministic
 regression coverage is:
 
 1. create a hub with an inline module and a queued event-bus awaiter with a

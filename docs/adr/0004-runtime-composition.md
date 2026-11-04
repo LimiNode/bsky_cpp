@@ -1,7 +1,7 @@
 # ADR-0004: Runtime composition and dependency ownership
 
-- **Status:** Accepted direction; M1c runtime implementation is available
-  behind the opt-in `BSKY_BUILD_RUNTIME` CMake option.
+- **Status:** Accepted direction; a partial M1c Draft implementation is
+  available behind the opt-in `BSKY_BUILD_RUNTIME` CMake option.
 - **Date:** 2026-10-31
 - **Depends on:** ADR-0002, ADR-0003, and [`DEPENDENCY_REUSE_AUDIT.md`](../research/DEPENDENCY_REUSE_AUDIT.md)
 
@@ -20,6 +20,14 @@ The foundation remains dependency-independent. The M1c runtime target and its
 event-hub composition are implementation evidence for the operation-runtime
 portion of this decision; managed awaiter timeout guarantees remain gated by
 the upstream correction described below.
+
+The Draft's exact subset, source domain, package component selection, stop
+policy, lifetime ownership, and compatibility implications are specified in
+[OPERATION_RUNTIME.md](../contracts/OPERATION_RUNTIME.md). This implementation
+uses the upstream blocking `ModuleHub::run()` on its sole leased execution
+thread, rather than `start()`'s internally joinable thread. This allows a
+callback to release the last public owner without self-join; no cleanup worker
+or additional scheduler is introduced. The broader M1c gate remains open.
 
 ## Decision
 
@@ -68,9 +76,9 @@ The production runtime supports two modes over the same event-hub primitives:
 - **Managed:** the runtime owns an event-hub `ModuleHub` lifetime lease and
   starts/stops it according to an explicit policy. Upstream modules own their
   task managers and private workers. Managed task execution may be used with a
-  documented limitation: timed awaiter delivery, timeout-driven cleanup, and
-  shutdown wake-up are not guaranteed until the complete upstream correction
-  below lands.
+  documented limitation: timed awaiter delivery and timeout-driven cleanup are
+  not guaranteed until the complete upstream correction below lands. Explicit
+  `ModuleHub::request_stop()` already notifies the loop correctly.
 - **External:** the caller owns the loop. The runtime installs a non-owning
   notifier, calls `process_once()`, and explicitly aggregates module task,
   EventBus awaiter, and transport deadlines. It must not create a parallel
@@ -87,7 +95,7 @@ managed polling cap. Consequently:
 - external mode must aggregate the bus awaiter deadline itself;
 - managed mode may execute ordinary tasks with this limitation, but must require
   the complete upstream event-hub correction before promising awaiter timeout
-  delivery, shutdown wake-up, or timeout-driven lifetime cleanup; and
+  delivery or timeout-driven lifetime cleanup; and
 - this ADR does not claim that `ModuleHub::start()` or `run()` supports a local
   polling-cap workaround.
 

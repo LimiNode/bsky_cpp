@@ -62,14 +62,16 @@ jobs:
         build_type: [Debug, Release]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize pinned runtime dependency
+        run: git submodule update --init external/event-hub-cpp
       - name: Configure
         run: cmake -S . -B build/runtime-ci -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBSKY_BUILD_TESTS=ON -DBSKY_BUILD_RUNTIME=ON
       - name: Build
         run: cmake --build build/runtime-ci --config ${{ matrix.build_type }} --parallel
       - name: Test
         run: ctest --test-dir build/runtime-ci --build-config ${{ matrix.build_type }} --output-on-failure
+      - name: Repeat runtime race and lifetime tests
+        run: ctest --test-dir build/runtime-ci --build-config ${{ matrix.build_type }} -R "^bsky_cpp.runtime$" --repeat until-fail:20 --output-on-failure
       - name: Install
         run: cmake --install build/runtime-ci --config ${{ matrix.build_type }} --prefix "${{ github.workspace }}/build/runtime-install"
       - name: Runtime consumer configure
@@ -78,6 +80,8 @@ jobs:
         run: cmake --build build/runtime-consumer --config ${{ matrix.build_type }} --parallel
       - name: Runtime consumer test
         run: ctest --test-dir build/runtime-consumer --build-config ${{ matrix.build_type }} --output-on-failure
+      - name: Foundation isolation with runtime installed
+        run: cmake -DPREFIX="${{ github.workspace }}/build/runtime-install" -DOUTPUT="${{ github.workspace }}/build/package-isolation" -DSOURCE_DIR="${{ github.workspace }}" -DBUILD_TYPE=${{ matrix.build_type }} -P tools/check_package_isolation.cmake
 
   documentation:
     name: Documentation / Doxygen
@@ -100,22 +104,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize pinned runtime dependency
+        run: git submodule update --init external/event-hub-cpp
       - name: Configure
         run: cmake -S . -B build/runtime-sanitized -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON -DBSKY_BUILD_RUNTIME=ON -DBSKY_ENABLE_SANITIZERS=ON
       - name: Build
         run: cmake --build build/runtime-sanitized --parallel
       - name: Test
         run: ctest --test-dir build/runtime-sanitized --output-on-failure
+      - name: Repeat runtime race and lifetime tests under sanitizers
+        run: ctest --test-dir build/runtime-sanitized -R "^bsky_cpp.runtime$" --repeat until-fail:20 --output-on-failure
 
   runtime-documentation:
     name: Runtime / Documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize pinned runtime dependency
+        run: git submodule update --init external/event-hub-cpp
       - name: Install Doxygen
         run: |
           sudo apt-get update

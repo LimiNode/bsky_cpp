@@ -1,6 +1,7 @@
 # ADR-0002: Async execution contract
 
-- **Status:** Accepted for M0c; implementation remains deferred.
+- **Status:** Accepted for M0c; partial Draft implementation is scoped in
+  [OPERATION_RUNTIME.md](../contracts/OPERATION_RUNTIME.md).
 - **Date:** 2026-10-25
 - **Depends on:** ADR-0001 and `DELIVERY_AND_LIFETIME.md`
 

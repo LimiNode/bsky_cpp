@@ -21,10 +21,10 @@ enum class ErrorCategory : std::uint8_t {
     Authentication,
     Authorization,
     RateLimited,
-    Backpressure,
     Conflict,
     OutcomeUnknown,
-    Internal
+    Internal,
+    Backpressure
 };
 
 /// Returns a stable diagnostic name for an error category.

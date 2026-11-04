@@ -6,6 +6,7 @@
 
 #include <string>
 #include <chrono>
+#include <atomic>
 
 int main() {
     bsky_cpp::Result<int> result(42);
@@ -54,7 +55,14 @@ int main() {
     }
 #ifdef BSKY_CONSUMER_RUNTIME
     bsky_cpp::runtime::Runtime runtime;
-    if (!runtime.start() || !runtime.shutdown(std::chrono::seconds(1))) {
+    if (!runtime.start()) return 1;
+    std::atomic<bool> delivered{false};
+    auto operation = runtime.submit([](bsky_cpp::CancellationToken) {
+        return bsky_cpp::Result<void>::success();
+    }, [&](bsky_cpp::Result<void> completion) { delivered = completion.has_value(); });
+    if (!operation || !operation.value().wait_for_completion(std::chrono::seconds(1)) ||
+        !operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
+        !delivered || !runtime.shutdown(std::chrono::seconds(1))) {
         return 1;
     }
 #endif

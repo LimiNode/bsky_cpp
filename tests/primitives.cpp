@@ -74,6 +74,10 @@ bool result_success_and_error() {
         return false;
     }
 
+    if (!BSKY_TEST_CHECK(std::string(bsky_cpp::error_category_name(
+                            bsky_cpp::ErrorCategory::Backpressure)) == "backpressure")) {
+        return false;
+    }
     bsky_cpp::Error error(
         bsky_cpp::ErrorCategory::Transport, "request failed", "read_profile");
     error.add_metadata("status", "503");

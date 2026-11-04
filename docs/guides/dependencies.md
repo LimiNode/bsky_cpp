@@ -50,3 +50,10 @@ Time Shield NTP explicitly `OFF`, and isolate cache variables in a documented
 toolchain/preset. Installed config files must use `find_dependency()` for every
 transitive target they expose. PR #9 records this topology only; it does not
 implement any of these targets.
+
+M1c now implements the runtime subset and package boundary described in
+[OPERATION_RUNTIME.md](../contracts/OPERATION_RUNTIME.md). Request the installed
+target using `find_package(bsky_cpp CONFIG REQUIRED COMPONENTS runtime)`.
+No-component discovery loads foundation only, even from a combined install.
+Source fallback disables upstream optional integrations in function-local
+option scope; it does not force a parent's dependency cache settings.
