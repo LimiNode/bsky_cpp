@@ -21,6 +21,7 @@ enum class ErrorCategory : std::uint8_t {
     Authentication,
     Authorization,
     RateLimited,
+    Backpressure,
     Conflict,
     OutcomeUnknown,
     Internal

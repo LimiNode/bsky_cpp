@@ -14,6 +14,7 @@ option(BSKY_BUILD_TESTS "Build bsky_cpp tests" ${BUILD_TESTING})
 option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
 option(BSKY_BUILD_DOCUMENTATION "Build bsky_cpp Doxygen documentation" OFF)
+option(BSKY_BUILD_RUNTIME "Build the optional event-hub-backed operation runtime" OFF)
 
 # Explicit install surface; add public .ipp/.tpp fragments here when needed.
 set(BSKY_PUBLIC_HEADERS
@@ -24,6 +25,10 @@ set(BSKY_PUBLIC_HEADERS
     src/bsky_cpp/core/version.hpp
     src/bsky_cpp/atproto/identifiers.hpp
     src/bsky_cpp/transport/transport.hpp
+)
+
+set(BSKY_RUNTIME_PUBLIC_HEADERS
+    src/bsky_cpp/runtime/runtime.hpp
 )
 
 # Canonical public-header names, derived from the source allowlist. Every
@@ -78,6 +83,38 @@ if(BSKY_ENABLE_SANITIZERS)
     bsky_cpp_enable_sanitizers(bsky_cpp)
 endif()
 
+if(BSKY_BUILD_RUNTIME)
+    set(EVENT_HUB_CPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(EVENT_HUB_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(external/event-hub-cpp ${CMAKE_CURRENT_BINARY_DIR}/external/event-hub-cpp)
+
+    find_package(Threads REQUIRED)
+    add_library(bsky_cpp_runtime STATIC
+        src/bsky_cpp/runtime/runtime.cpp
+    )
+    add_library(bsky_cpp::runtime ALIAS bsky_cpp_runtime)
+    target_compile_features(bsky_cpp_runtime PUBLIC cxx_std_17)
+    target_include_directories(bsky_cpp_runtime
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    target_link_libraries(bsky_cpp_runtime
+        PUBLIC bsky_cpp::bsky_cpp event_hub::event_hub Threads::Threads
+    )
+    set_target_properties(bsky_cpp_runtime PROPERTIES EXPORT_NAME runtime)
+    if(MSVC)
+        target_compile_options(bsky_cpp_runtime PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(bsky_cpp_runtime PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    if(BSKY_ENABLE_SANITIZERS)
+        bsky_cpp_enable_sanitizers(bsky_cpp_runtime)
+    endif()
+endif()
+
+set(BSKY_RUNTIME_ENABLED ${BSKY_BUILD_RUNTIME})
+
 if(BSKY_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
@@ -94,6 +131,11 @@ if(BSKY_BUILD_DOCUMENTATION)
     foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
         string(APPEND BSKY_DOXYGEN_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${header} ")
     endforeach()
+    if(BSKY_BUILD_RUNTIME)
+        foreach(header IN LISTS BSKY_RUNTIME_PUBLIC_HEADERS)
+            string(APPEND BSKY_DOXYGEN_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${header} ")
+        endforeach()
+    endif()
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Doxyfile.in"
         "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
@@ -123,6 +165,13 @@ foreach(header IN LISTS BSKY_PUBLIC_HEADERS)
     endif()
     install(FILES "${header}" DESTINATION "${header_destination}")
 endforeach()
+if(BSKY_BUILD_RUNTIME)
+    foreach(header IN LISTS BSKY_RUNTIME_PUBLIC_HEADERS)
+        file(RELATIVE_PATH header_name "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
+        get_filename_component(header_directory "${header_name}" DIRECTORY)
+        install(FILES "${header}" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${header_directory}")
+    endforeach()
+endif()
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfigVersion.cmake"
@@ -133,6 +182,15 @@ configure_package_config_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfig.cmake"
     INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/bsky_cpp"
 )
+
+if(BSKY_BUILD_RUNTIME)
+    install(TARGETS bsky_cpp_runtime
+        EXPORT bsky_cppTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
 
 install(EXPORT bsky_cppTargets
     FILE bsky_cppTargets.cmake

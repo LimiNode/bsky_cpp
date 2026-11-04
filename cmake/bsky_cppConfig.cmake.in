@@ -1,4 +1,10 @@
 @PACKAGE_INIT@
 
+include(CMakeFindDependencyMacro)
+
+if(@BSKY_RUNTIME_ENABLED@)
+    find_dependency(event-hub-cpp CONFIG)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/bsky_cppTargets.cmake")
 check_required_components(bsky_cpp)

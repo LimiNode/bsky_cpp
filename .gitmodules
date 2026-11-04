@@ -1,0 +1,3 @@
+[submodule "external/event-hub-cpp"]
+	path = external/event-hub-cpp
+	url = https://github.com/LimiNode/event-hub-cpp

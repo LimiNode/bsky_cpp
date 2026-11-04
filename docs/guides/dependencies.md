@@ -22,12 +22,13 @@ configure, build, and test without initialized optional dependencies. Runtime
 and adapter components are opt-in build/package components with explicit
 dependency discovery and export requirements.
 
-Stage 2 records the intended target topology; it is not implemented yet:
+Stage 2 records the target topology; the foundation/runtime split is now
+implemented for M1c:
 
 | Component | Target shape | Dependency | Installation consequence |
 | --- | --- | --- | --- |
 | Foundation | `bsky_cpp::bsky_cpp` (current target) | none beyond the C++ standard library | installed by default; existing consumers remain dependency-free |
-| Runtime | future `bsky_cpp::runtime` | `event-hub-cpp::event-hub-cpp` and Threads | opt-in component; config package uses `find_dependency(event-hub-cpp CONFIG)` |
+| Runtime | `bsky_cpp::runtime` | `event-hub-cpp::event-hub-cpp` and Threads | opt-in component; config package uses `find_dependency(event-hub-cpp CONFIG)` |
 | High-level Client | provisional transport-neutral Client target | `bsky_cpp::runtime` plus the abstract async transport seam | installable without kurlyk when another compatible backend is selected |
 | Kurlyk adapter | future `bsky_cpp::kurlyk_adapter` | runtime/Client seam plus `kurlyk::kurlyk` and its exported transitive dependencies | opt-in concrete adapter; only this component discovers/exports kurlyk |
 | Other transport adapters | future backend-specific targets | same abstract async transport seam | independently selectable; no Client API change |

@@ -1,6 +1,7 @@
 # ADR-0004: Runtime composition and dependency ownership
 
-- **Status:** Accepted direction for Stage 2; implementation deferred to M1c.
+- **Status:** Accepted direction; M1c runtime implementation is available
+  behind the opt-in `BSKY_BUILD_RUNTIME` CMake option.
 - **Date:** 2026-10-31
 - **Depends on:** ADR-0002, ADR-0003, and [`DEPENDENCY_REUSE_AUDIT.md`](../research/DEPENDENCY_REUSE_AUDIT.md)
 
@@ -15,8 +16,10 @@ runtime, while keeping the high-level Client transport-neutral and network,
 persistence, and application-level streams behind replaceable or optional
 components.
 
-This document is architectural policy, not implementation evidence. No runtime
-target, dependency, or M1c executor exists in this repository yet.
+The foundation remains dependency-independent. The M1c runtime target and its
+event-hub composition are implementation evidence for the operation-runtime
+portion of this decision; managed awaiter timeout guarantees remain gated by
+the upstream correction described below.
 
 ## Decision
 

@@ -99,6 +99,8 @@ const char* error_category_name(ErrorCategory category) noexcept {
             return "authorization";
         case ErrorCategory::RateLimited:
             return "rate_limited";
+        case ErrorCategory::Backpressure:
+            return "backpressure";
         case ErrorCategory::Conflict:
             return "conflict";
         case ErrorCategory::OutcomeUnknown:

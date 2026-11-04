@@ -1,6 +1,11 @@
 #include <bsky_cpp.hpp>
 
+#ifdef BSKY_CONSUMER_RUNTIME
+#include <bsky_cpp/runtime/runtime.hpp>
+#endif
+
 #include <string>
+#include <chrono>
 
 int main() {
     bsky_cpp::Result<int> result(42);
@@ -47,5 +52,11 @@ int main() {
     if (!request || !response) {
         return 1;
     }
+#ifdef BSKY_CONSUMER_RUNTIME
+    bsky_cpp::runtime::Runtime runtime;
+    if (!runtime.start() || !runtime.shutdown(std::chrono::seconds(1))) {
+        return 1;
+    }
+#endif
     return 0;
 }

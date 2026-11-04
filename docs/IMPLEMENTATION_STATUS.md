@@ -24,23 +24,29 @@ A document, example, or roadmap item is not evidence of an implementation.
   include and an optional Doxygen documentation target. The public-header
   allowlist generates installation, Doxygen input, and compile-only API checks;
   CI runs the documentation target with warnings treated as errors.
+- M1c operation runtime: optional event-hub-backed managed/external execution,
+  bounded admission, cancellation/completion arbitration, callback
+  quiescence, and bounded shutdown in [`runtime/runtime.hpp`](../src/bsky_cpp/runtime/runtime.hpp),
+  with integration tests and install/export coverage when `BSKY_BUILD_RUNTIME=ON`.
 
 ## Partial
 
-- M0 is complete as scoped: M0a/M0b are implemented and M0c is an accepted
-  documentation-only async contract. M1c async executor, callback, and
-  operation machinery remain deferred.
-- Stage 2 dependency reuse audit is documentation-only: exact upstream source
-  snapshots, ownership decisions, and an M1c conformance gate are recorded in
-  [`DEPENDENCY_REUSE_AUDIT.md`](research/DEPENDENCY_REUSE_AUDIT.md) and
-  ADR-0004. No optional dependency is installed or integrated by this stage.
+- M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
+  accepted documentation contract. Managed timed awaiter guarantees in M1c
+  remain gated by the upstream event-hub correction.
+- Stage 2 dependency reuse audit: the pinned `event-hub-cpp` snapshot is
+  integrated only by the opt-in M1c runtime target; the foundation target still
+  has no runtime dependency. Ownership decisions and the upstream awaiter gate
+  remain recorded in [`DEPENDENCY_REUSE_AUDIT.md`](research/DEPENDENCY_REUSE_AUDIT.md)
+  and ADR-0004.
 
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
-- The M0c async vocabulary, callback registration/quiescence contract, and
-  optional future-adapter boundary are documented in ADR-0002 and remain
-  contract-only; no executor or callback implementation is included.
+- The M0c async vocabulary and optional future-adapter boundary remain
+  contract-only. M1c implements the callback-first operation runtime in the
+  opt-in `bsky_cpp::runtime` target; guaranteed managed awaiter timeout
+  delivery remains gated by the upstream event-hub correction.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
   events/streaming, delivery/lifetime, and persistence seams.
 - DID/handle resolution and endpoint discovery remain contract-only; M1a only
@@ -49,14 +55,13 @@ A document, example, or roadmap item is not evidence of an implementation.
 
 ## Planned
 
-- M1c and later protocol/transport work through M5 as described in
+- M1d and later protocol/transport work through M5 as described in
   [`ROADMAP.md`](ROADMAP.md).
 
 ## Deferred
 
-- Network integrations, generated Lexicon classes, the event-hub-cpp-backed
-  production runtime, kurlyk/MDBX adapters, full async callback/executor
-  machinery, and AI/LLM logic.
+- Network integrations, generated Lexicon classes, kurlyk/MDBX adapters,
+  XRPC mapping, and AI/LLM logic.
 
 ## Evidence rule
 
