@@ -4,7 +4,9 @@
 #include <event_hub/module_hub.hpp>
 
 #include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -26,6 +28,7 @@ struct OperationState {
     bool callback_started = false;
     bool callback_cleanup = false;
     bool callback_done = false;
+    bool stop_handled = false;
 };
 
 // Identifies reentrant lifecycle/wait calls from work, callbacks, and captures.
@@ -114,15 +117,16 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 return Result<std::size_t>::failure(Error(
                     ErrorCategory::Conflict, "runtime is not externally running", "runtime.process_once"));
             }
+            external_consumer_active = true;
         }
         ExecutionScope scope(this);
         try {
             const auto count = hub.process_once();
-            finalize_external();
+            finish_external_pass(consumer);
             return Result<std::size_t>::success(count);
         } catch (...) {
             stop();
-            finalize_external();
+            finish_external_pass(consumer);
             return Result<std::size_t>::failure(Error(
                 ErrorCategory::Internal, "runtime processing failed", "runtime.process_once"));
         }
@@ -132,12 +136,21 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         if (executing_core == this) return std::nullopt;
         std::unique_lock<std::mutex> consumer(consumer_mutex, std::try_to_lock);
         if (!consumer.owns_lock()) return std::nullopt;
-        std::lock_guard<std::mutex> lock(mutex);
-        if (options.mode != RuntimeMode::External || !ready || exited) return std::nullopt;
-        if (hub.has_pending()) return std::chrono::steady_clock::now();
-        auto deadline = hub.next_deadline();
-        const auto awaiter = hub.bus().next_awaiter_deadline(event_hub::DispatchSource::queued);
-        if (awaiter && (!deadline || *awaiter < *deadline)) deadline = awaiter;
+        std::optional<Runtime::TimePoint> deadline;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (options.mode != RuntimeMode::External || !ready || exited) return std::nullopt;
+            external_consumer_active = true;
+            if (hub.has_pending()) {
+                deadline = std::chrono::steady_clock::now();
+            } else {
+                deadline = hub.next_deadline();
+                const auto awaiter =
+                    hub.bus().next_awaiter_deadline(event_hub::DispatchSource::queued);
+                if (awaiter && (!deadline || *awaiter < *deadline)) deadline = awaiter;
+            }
+        }
+        release_external_consumer(consumer, false);
         return deadline;
     }
 
@@ -279,21 +292,59 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
     void cancel(const std::shared_ptr<OperationState>& state, ErrorCategory category) {
         state->cancellation.request_cancellation();
-        complete(state, Result<void>::failure(Error(
-            category, "operation stopped", "runtime.operation")));
+        try {
+            if (fail_next_terminal_error.exchange(false)) throw std::bad_alloc();
+            complete(state, Result<void>::failure(Error(
+                category, "operation stopped", "runtime.operation")));
+        } catch (...) {
+            emergency_complete(state, category);
+        }
         // Keep capacity until the queued work thunk is consumed, so repeated
         // submit/cancel cannot turn the upstream queue into an unbounded one.
     }
 
-    void stop() {
-        std::vector<std::shared_ptr<OperationState>> live;
+    void emergency_complete(const std::shared_ptr<OperationState>& state,
+                            ErrorCategory category) noexcept {
+        CompletionCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->completed) return;
+            state->callback_closed = true;
+            state->callback_cleanup = true;
+            state->error = category;
+            state->payload.reset();
+            state->completed = true;
+            callback = std::move(state->callback);
+            retire(state);
+        }
+        ExecutionScope scope(this);
+        callback.reset();
+        std::lock_guard<std::mutex> lock(mutex);
+        state->callback_cleanup = false;
+        state->callback_done = true;
+        retire(state);
+    }
+
+    void stop() noexcept {
         {
             std::lock_guard<std::mutex> lock(mutex);
             accepting = false;
             stopping = true;
-            for (const auto& item : operations) live.push_back(item.second);
         }
-        for (const auto& state : live) {
+        for (;;) {
+            std::shared_ptr<OperationState> state;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (operations.empty()) break;
+                for (const auto& item : operations) {
+                    if (!item.second->stop_handled) {
+                        item.second->stop_handled = true;
+                        state = item.second;
+                        break;
+                    }
+                }
+            }
+            if (!state) break;
             close_callback(state);
             cancel(state, ErrorCategory::Shutdown);
             abandon_work(state);
@@ -303,7 +354,12 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             if (ready && operations.empty()) hub.request_stop();
             condition.notify_all();
         }
-        if (options.mode == RuntimeMode::External && executing_core != this) {
+        bool consumer_active = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            consumer_active = external_consumer_active;
+        }
+        if (options.mode == RuntimeMode::External && executing_core != this && !consumer_active) {
             std::unique_lock<std::mutex> consumer(consumer_mutex, std::try_to_lock);
             if (consumer.owns_lock()) finalize_external();
         }
@@ -313,15 +369,46 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         stop();
         std::unique_lock<std::mutex> lock(mutex);
-        if (executing_core == this) return pending("quiescence is pending on the current invocation");
+        if (executing_core == this) return pending(ErrorCategory::QuiescencePending,
+                                                   "quiescence is pending on the current invocation");
         if (!condition.wait_until(lock, deadline, [this] {
                 return operations.empty() && (!started || exited);
-            })) return pending("shutdown deadline expired; quiescence is pending");
+            })) return pending(ErrorCategory::ShutdownTimedOut,
+                              "shutdown deadline expired; quiescence is pending");
         return Result<void>::success();
     }
 
-    static Result<void> pending(const char* message) {
-        return Result<void>::failure(Error(ErrorCategory::Shutdown, message, "runtime.shutdown"));
+    static Result<void> pending(ErrorCategory category, const char* message) {
+        return Result<void>::failure(Error(category, message, "runtime.shutdown"));
+    }
+
+    void release_external_consumer(std::unique_lock<std::mutex>& consumer,
+                                   bool observe_hook) {
+        std::function<void()> hook;
+        if (observe_hook) {
+            std::lock_guard<std::mutex> lock(mutex);
+            hook = external_pass_hook;
+        }
+        if (hook) hook();
+
+        bool should_finalize = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            should_finalize = stopping && operations.empty();
+            if (!should_finalize) {
+                // Keep the core lock while handing the consumer mutex back.
+                // stop() therefore cannot miss the handoff between its final
+                // registry check and the end of this pass.
+                external_consumer_active = false;
+                consumer.unlock();
+                condition.notify_all();
+            }
+        }
+        if (should_finalize) finalize_external();
+    }
+
+    void finish_external_pass(std::unique_lock<std::mutex>& consumer) {
+        release_external_consumer(consumer, true);
     }
 
     // Called only by the external single consumer, never by a producer.
@@ -333,6 +420,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         hub.shutdown();
         std::lock_guard<std::mutex> lock(mutex);
         exited = true;
+        external_consumer_active = false;
         condition.notify_all();
     }
 
@@ -355,12 +443,25 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     bool accepting = false;
     bool stopping = false;
     bool exited = false;
+    bool external_consumer_active = false;
+    std::function<void()> external_pass_hook;
+    std::atomic<bool> fail_next_terminal_error{false};
 };
 
 std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
 
 void RuntimeTestAccess::close_executor(Runtime& runtime) {
     runtime.m_core->module->tasks().close();
+}
+
+void RuntimeTestAccess::set_external_pass_hook(Runtime& runtime,
+                                                std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
+    runtime.m_core->external_pass_hook = std::move(hook);
+}
+
+void RuntimeTestAccess::fail_next_terminal_error(Runtime& runtime) {
+    runtime.m_core->fail_next_terminal_error = true;
 }
 
 std::size_t RuntimeTestAccess::registered_operations(Runtime& runtime) {
@@ -433,7 +534,9 @@ Runtime& Runtime::operator=(Runtime&& other) noexcept {
 }
 
 Result<void> Runtime::start() {
-    return m_core ? m_core->start() : detail::RuntimeCore::pending("empty runtime");
+    return m_core ? m_core->start()
+                  : detail::RuntimeCore::pending(ErrorCategory::Shutdown,
+                                                 "empty runtime");
 }
 
 Result<std::size_t> Runtime::process_once() {

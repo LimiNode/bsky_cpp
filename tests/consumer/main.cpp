@@ -54,6 +54,10 @@ int main() {
         return 1;
     }
 #ifdef BSKY_CONSUMER_RUNTIME
+    if (std::string(bsky_cpp::error_category_name(
+            bsky_cpp::ErrorCategory::QuiescencePending)) != "quiescence_pending" ||
+        std::string(bsky_cpp::error_category_name(
+            bsky_cpp::ErrorCategory::ShutdownTimedOut)) != "shutdown_timed_out") return 1;
     bsky_cpp::runtime::Runtime runtime;
     if (!runtime.start()) return 1;
     std::atomic<bool> delivered{false};

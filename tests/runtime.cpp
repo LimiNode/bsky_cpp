@@ -167,6 +167,85 @@ void external_stop_without_loop() {
     BSKY_RUNTIME_CHECK(calls == 0 && Access::registered_operations(runtime) == 0U);
 }
 
+void terminal_allocation_failure() {
+    auto runtime = external(1U);
+    int callbacks = 0;
+    auto operation = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(operation);
+    Access::fail_next_terminal_error(runtime);
+    operation.value().request_cancellation();
+    BSKY_RUNTIME_CHECK(operation.value().is_completed());
+    BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Cancelled);
+    BSKY_RUNTIME_CHECK(operation.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(runtime) == 0U);
+    BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+}
+
+void independent_runtimes_and_concurrent_stop() {
+    auto first = external(1U);
+    auto second = external(1U);
+    Gate entered, release;
+    auto blocked = first.submit([&](CancellationToken) {
+        entered.signal();
+        release.wait();
+        return Result<void>::success();
+    });
+    BSKY_RUNTIME_CHECK(blocked);
+    std::thread consumer([&] { BSKY_RUNTIME_CHECK(first.process_once()); });
+    entered.wait();
+    auto independent = second.submit(success());
+    BSKY_RUNTIME_CHECK(independent);
+    BSKY_RUNTIME_CHECK(second.process_once());
+    BSKY_RUNTIME_CHECK(independent.value().is_completed());
+    BSKY_RUNTIME_CHECK(second.shutdown(1s));
+    std::thread stop_a([&] { first.request_stop(); });
+    std::thread stop_b([&] { first.request_stop(); });
+    stop_a.join();
+    stop_b.join();
+    auto pending = first.shutdown(0ms);
+    BSKY_RUNTIME_CHECK(!pending &&
+                       pending.error().category() == ErrorCategory::ShutdownTimedOut);
+    release.signal();
+    consumer.join();
+    BSKY_RUNTIME_CHECK(first.shutdown(1s));
+    BSKY_RUNTIME_CHECK(Access::registered_operations(first) == 0U);
+    BSKY_RUNTIME_CHECK(Access::registered_operations(second) == 0U);
+}
+
+void external_finalization_handoff() {
+    auto runtime = external(1U);
+    Gate hook_entered, stop_done, release_hook, shutdown_returned;
+    Access::set_external_pass_hook(runtime, [&] {
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 1U);
+        hook_entered.signal();
+        release_hook.wait();
+    });
+    std::atomic<int> callbacks{0};
+    auto operation = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(operation);
+    std::atomic<bool> shutdown_ok{false};
+    std::thread stopper([&] {
+        hook_entered.wait();
+        runtime.request_stop();
+        stop_done.signal();
+        shutdown_ok = static_cast<bool>(runtime.shutdown(1s));
+        shutdown_returned.signal();
+    });
+    std::thread consumer([&] { BSKY_RUNTIME_CHECK(runtime.process_once()); });
+    hook_entered.wait();
+    stop_done.wait();
+    release_hook.signal();
+    shutdown_returned.wait();
+    consumer.join();
+    stopper.join();
+    BSKY_RUNTIME_CHECK(shutdown_ok.load());
+    BSKY_RUNTIME_CHECK(operation.value().is_completed());
+    BSKY_RUNTIME_CHECK(!operation.value().error_category());
+    BSKY_RUNTIME_CHECK(callbacks == 0);
+    BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+}
+
 void running_work_and_callback_quiescence(bool block_callback, RuntimeMode mode) {
     Runtime runtime({mode, 1U, {}});
     BSKY_RUNTIME_CHECK(runtime.start());
@@ -197,7 +276,8 @@ void running_work_and_callback_quiescence(bool block_callback, RuntimeMode mode)
     if (block_callback) BSKY_RUNTIME_CHECK(!result.value().await_callback_quiescence(0ms));
     const auto before = std::chrono::steady_clock::now();
     auto pending = runtime.shutdown(10ms);
-    BSKY_RUNTIME_CHECK(!pending && pending.error().category() == ErrorCategory::Shutdown);
+    BSKY_RUNTIME_CHECK(!pending &&
+                       pending.error().category() == ErrorCategory::ShutdownTimedOut);
     BSKY_RUNTIME_CHECK(std::chrono::steady_clock::now() - before < 1s);
     BSKY_RUNTIME_CHECK(!weak.expired());
     release.signal();
@@ -254,7 +334,8 @@ void self_shutdown_and_destruction(RuntimeMode mode) {
         BSKY_RUNTIME_CHECK(!handle.await_callback_quiescence(1s));
         const auto before = std::chrono::steady_clock::now();
         auto pending = runtime->shutdown(1s);
-        BSKY_RUNTIME_CHECK(!pending && pending.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(!pending &&
+                           pending.error().category() == ErrorCategory::QuiescencePending);
         BSKY_RUNTIME_CHECK(std::chrono::steady_clock::now() - before < 500ms);
         runtime.reset(); // Last public owner is released on its own executor.
         BSKY_RUNTIME_CHECK(*capture == 1);
@@ -298,6 +379,9 @@ int main() {
         running_work_and_callback_quiescence(true, mode);
     }
     concurrent_admission_cancel_stop();
+    terminal_allocation_failure();
+    independent_runtimes_and_concurrent_stop();
+    external_finalization_handoff();
     self_shutdown_and_destruction(RuntimeMode::External);
     self_shutdown_and_destruction(RuntimeMode::Managed);
     notifier_and_move_assignment();

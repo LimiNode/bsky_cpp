@@ -24,7 +24,9 @@ enum class ErrorCategory : std::uint8_t {
     Conflict,
     OutcomeUnknown,
     Internal,
-    Backpressure
+    Backpressure,      ///< Admission capacity is currently exhausted.
+    QuiescencePending, ///< Shutdown was requested from its own invocation.
+    ShutdownTimedOut   ///< Shutdown did not quiesce before its deadline.
 };
 
 /// Returns a stable diagnostic name for an error category.

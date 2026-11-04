@@ -107,6 +107,10 @@ const char* error_category_name(ErrorCategory category) noexcept {
             return "outcome_unknown";
         case ErrorCategory::Internal:
             return "internal";
+        case ErrorCategory::QuiescencePending:
+            return "quiescence_pending";
+        case ErrorCategory::ShutdownTimedOut:
+            return "shutdown_timed_out";
     }
     return "internal";
 }

@@ -115,6 +115,25 @@ jobs:
       - name: Repeat runtime race and lifetime tests under sanitizers
         run: ctest --test-dir build/runtime-sanitized -R "^bsky_cpp.runtime$" --repeat until-fail:20 --output-on-failure
 
+  runtime-tsan:
+    name: Runtime / Ubuntu / TSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize pinned runtime dependency
+        run: git submodule update --init external/event-hub-cpp
+      - name: Configure
+        run: >-
+          cmake -S . -B build/runtime-tsan
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          -DBSKY_BUILD_TESTS=ON -DBSKY_BUILD_RUNTIME=ON
+      - name: Build
+        run: cmake --build build/runtime-tsan --parallel
+      - name: Test runtime race fixture
+        run: ctest --test-dir build/runtime-tsan -R "^bsky_cpp.runtime$" --output-on-failure
+
   runtime-documentation:
     name: Runtime / Documentation
     runs-on: ubuntu-latest

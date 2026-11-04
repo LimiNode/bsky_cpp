@@ -254,9 +254,9 @@ public:
 
     /// Stops admission and waits for work/callback quiescence and loop exit.
     /// Queued work is aborted and queued callbacks suppressed. No user callback
-    /// is run by shutdown(). A timeout returns ErrorCategory::Shutdown with
-    /// quiescence pending; shared state owns later cleanup. A call from this
-    /// runtime's work/callback immediately reports pending without self-wait.
+    /// is run by shutdown(). A timeout returns ShutdownTimedOut; a call from
+    /// this runtime's work/callback returns QuiescencePending without self-wait.
+    /// Shared state owns later cleanup in both cases.
     /// \param timeout Maximum shutdown wait.
     /// \return Success or a shutdown error.
     Result<void> shutdown(std::chrono::milliseconds timeout =

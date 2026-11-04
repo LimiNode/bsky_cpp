@@ -30,6 +30,10 @@ There is no inline callback fallback. The callback slot is reserved before the
 terminal result is committed; failure to reserve it can therefore be reported
 without rewriting a previously committed result. Work exceptions become
 `Internal`; callback exceptions are contained after the terminal result is set.
+The stop and cancellation entry points are `noexcept`: they do not allocate a
+snapshot of the registry, and an allocation failure while constructing a
+terminal error falls back to a typed category, suppresses delivery, and still
+releases the callback capture after work cleanup.
 
 `close()` suppresses a not-yet-started registration. An executing callback
 finishes normally. `await_quiescence()` waits until delivery is completed or
@@ -57,6 +61,12 @@ non-blocking, and must not reenter the runtime. Read the notifier generation
 before processing and use its generation-aware wait after processing to avoid
 lost wakeups. No borrowed notifier overload is provided.
 
+The finalization handoff is serialized by the core mutex. A stop that arrives
+while an external pass owns the consumer lease leaves finalization to that pass;
+the pass rechecks the registry before handing the lease back. If no pass is
+active, stop takes the consumer lease itself. `hub.shutdown()` is never called
+concurrently with `hub.process_once()`.
+
 Concurrent submit, cancellation, close, and shutdown are supported. Moving or
 destroying a particular public object must not race ordinary access to that
 same object. Execution methods take a local core lease, permitting runtime
@@ -73,10 +83,11 @@ external pass. An active external pass retains its state and finishes cleanup
 when it returns; shutdown never starts a second consumer to drain it.
 
 `shutdown(timeout)` succeeds only after work, callback captures, and the loop
-are quiescent. A deadline failure is `ErrorCategory::Shutdown`, with pending
-quiescence reported in its diagnostic message; the state remains alive and a
-later shutdown can succeed. Self-shutdown returns pending immediately rather
-than waiting on its own invocation. Repeated stop/shutdown is idempotent.
+are quiescent. A self-shutdown returns `ErrorCategory::QuiescencePending`; a
+wait that reaches its deadline returns `ErrorCategory::ShutdownTimedOut`. The
+state remains alive and a later shutdown can succeed. Runtime stop itself and
+unfinished operation outcomes continue to use `ErrorCategory::Shutdown`.
+Repeated stop/shutdown is idempotent.
 Running user code cannot be forcibly stopped. Work, notifier calls, callbacks,
 and capture destructors must remain short; deadlines cannot preempt a blocking
 capture destructor executed by the caller during closure.
@@ -134,5 +145,6 @@ Still unimplemented: typed value-result operations, injected public executors,
 the blocking-transport bridge, operation deadlines, future adapters, high-level
 Client, XRPC, kurlyk, OAuth, WebSocket, and persistence. M1c remains partial and
 Draft pending independent source review; this contract does not claim that all
-items in the broader async conformance plan are delivered. TSan is not part of
-the current matrix; stress tests and ASan/UBSan do not substitute for it.
+items in the broader async conformance plan are delivered. TSan is run as a
+separate Linux job when supported by the toolchain; stress tests and ASan/UBSan
+do not substitute for it.
