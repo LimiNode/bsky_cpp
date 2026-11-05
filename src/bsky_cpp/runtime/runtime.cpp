@@ -4,6 +4,7 @@
 #include <event_hub/module_hub.hpp>
 
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <new>
@@ -183,8 +184,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             }
         }
         if (!queued) {
-            complete(state, Result<void>::failure(Error(
-                ErrorCategory::Shutdown, "executor rejected admitted work", "runtime.dispatch")));
+            try {
+                if (consume_fault(RuntimeFaultPoint::SubmitRejectionError)) throw std::bad_alloc();
+                complete(state, Result<void>::failure(Error(
+                    ErrorCategory::Shutdown, "executor rejected admitted work", "runtime.dispatch")));
+            } catch (...) {
+                emergency_complete(state, ErrorCategory::Shutdown);
+            }
             abandon_work(state);
         }
         return Result<OperationHandle>::success(OperationHandle(state));
@@ -200,11 +206,22 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         ExecutionScope scope(this);
         if (!state->cancellation.token().is_cancellation_requested()) {
-            try { complete(state, work(state->cancellation.token())); }
-            catch (...) {
-                complete(state, Result<void>::failure(Error(
-                    ErrorCategory::Internal, "operation work threw", "runtime.operation")));
+            Result<void> outcome;
+            bool outcome_ready = false;
+            try {
+                outcome = work(state->cancellation.token());
+                outcome_ready = true;
+            } catch (...) {
+                try {
+                    if (consume_fault(RuntimeFaultPoint::WorkError)) throw std::bad_alloc();
+                    outcome = Result<void>::failure(Error(
+                        ErrorCategory::Internal, "operation work threw", "runtime.operation"));
+                    outcome_ready = true;
+                } catch (...) {
+                    emergency_complete(state, ErrorCategory::Internal);
+                }
             }
+            if (outcome_ready) complete(state, std::move(outcome));
         }
         work.reset();
         std::lock_guard<std::mutex> lock(mutex);
@@ -213,27 +230,40 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     }
 
     void complete(const std::shared_ptr<OperationState>& state, Result<void> result) {
+        ErrorCategory emergency_category = result
+                                               ? ErrorCategory::Internal
+                                               : result.error().category();
         bool rejected = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (state->completed) return;
-            if (state->callback && !state->callback_closed) {
-                bool queued = false;
-                try {
-                    queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
-                        if (auto live = weak.lock()) live->core->deliver(live);
-                    }) != 0U;
-                } catch (...) {}
-                if (!queued) {
-                    result = Result<void>::failure(Error(
-                        ErrorCategory::Shutdown, "executor rejected terminal delivery", "runtime.dispatch"));
-                    rejected = true;
+        try {
+            if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (state->completed) return;
+                if (state->callback && !state->callback_closed) {
+                    bool queued = false;
+                    try {
+                        queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
+                            if (auto live = weak.lock()) live->core->deliver(live);
+                        }) != 0U;
+                    } catch (...) {}
+                    if (!queued) {
+                        emergency_category = ErrorCategory::Shutdown;
+                        if (consume_fault(RuntimeFaultPoint::DeliveryRejectionError)) {
+                            throw std::bad_alloc();
+                        }
+                        result = Result<void>::failure(Error(
+                            ErrorCategory::Shutdown, "executor rejected terminal delivery", "runtime.dispatch"));
+                        rejected = true;
+                    }
                 }
+                state->error = result ? std::nullopt
+                                      : std::optional<ErrorCategory>(result.error().category());
+                state->payload.emplace(std::move(result));
+                state->completed = true;
+                retire(state);
             }
-            state->error = result ? std::nullopt : std::optional<ErrorCategory>(result.error().category());
-            state->payload.emplace(std::move(result));
-            state->completed = true;
-            retire(state);
+        } catch (...) {
+            emergency_complete(state, emergency_category);
         }
         if (rejected) close_callback(state);
     }
@@ -293,7 +323,6 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     void cancel(const std::shared_ptr<OperationState>& state, ErrorCategory category) {
         state->cancellation.request_cancellation();
         try {
-            if (fail_next_terminal_error.exchange(false)) throw std::bad_alloc();
             complete(state, Result<void>::failure(Error(
                 category, "operation stopped", "runtime.operation")));
         } catch (...) {
@@ -445,7 +474,20 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     bool exited = false;
     bool external_consumer_active = false;
     std::function<void()> external_pass_hook;
-    std::atomic<bool> fail_next_terminal_error{false};
+    std::atomic<std::uint32_t> fault_mask{0U};
+
+    bool consume_fault(RuntimeFaultPoint point) noexcept {
+        const auto bit = std::uint32_t{1U} << static_cast<unsigned>(point);
+        auto current = fault_mask.load(std::memory_order_acquire);
+        while ((current & bit) != 0U) {
+            if (fault_mask.compare_exchange_weak(current, current & ~bit,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
@@ -460,8 +502,9 @@ void RuntimeTestAccess::set_external_pass_hook(Runtime& runtime,
     runtime.m_core->external_pass_hook = std::move(hook);
 }
 
-void RuntimeTestAccess::fail_next_terminal_error(Runtime& runtime) {
-    runtime.m_core->fail_next_terminal_error = true;
+void RuntimeTestAccess::inject_fault(Runtime& runtime, RuntimeFaultPoint point) {
+    const auto bit = std::uint32_t{1U} << static_cast<unsigned>(point);
+    runtime.m_core->fault_mask.fetch_or(bit, std::memory_order_release);
 }
 
 std::size_t RuntimeTestAccess::registered_operations(Runtime& runtime) {

@@ -22,6 +22,7 @@ using namespace std::chrono_literals;
 using namespace bsky_cpp;
 using namespace bsky_cpp::runtime;
 using Access = bsky_cpp::runtime::detail::RuntimeTestAccess;
+using Fault = bsky_cpp::runtime::detail::RuntimeFaultPoint;
 
 class Gate {
 public:
@@ -138,7 +139,10 @@ void queue_rejection_is_terminal() {
     for (bool reject_work : {false, true}) {
         auto runtime = external();
         int calls = 0;
-        if (reject_work) Access::close_executor(runtime);
+        if (reject_work) {
+            Access::close_executor(runtime);
+            Access::inject_fault(runtime, Fault::SubmitRejectionError);
+        }
         auto result = runtime.submit(
             [&runtime](CancellationToken) {
                 Access::close_executor(runtime);
@@ -172,7 +176,7 @@ void terminal_allocation_failure() {
     int callbacks = 0;
     auto operation = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
     BSKY_RUNTIME_CHECK(operation);
-    Access::fail_next_terminal_error(runtime);
+    Access::inject_fault(runtime, Fault::Terminalization);
     operation.value().request_cancellation();
     BSKY_RUNTIME_CHECK(operation.value().is_completed());
     BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Cancelled);
@@ -180,6 +184,53 @@ void terminal_allocation_failure() {
     BSKY_RUNTIME_CHECK(runtime.process_once());
     BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(runtime) == 0U);
     BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+}
+
+void execute_terminal_faults() {
+    auto runtime = external(1U);
+    int callbacks = 0;
+
+    Access::inject_fault(runtime, Fault::Terminalization);
+    auto success_fault = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(success_fault);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(success_fault.value().is_completed());
+    BSKY_RUNTIME_CHECK(success_fault.value().error_category() == ErrorCategory::Internal);
+    BSKY_RUNTIME_CHECK(success_fault.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(runtime) == 0U);
+
+    auto reusable = runtime.submit(success());
+    BSKY_RUNTIME_CHECK(reusable);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(reusable.value().is_completed());
+    BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+
+    Access::inject_fault(runtime, Fault::WorkError);
+    auto throwing_fault = runtime.submit(
+        [](CancellationToken) -> Result<void> { throw 7; },
+        [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(throwing_fault);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(throwing_fault.value().is_completed());
+    BSKY_RUNTIME_CHECK(throwing_fault.value().error_category() == ErrorCategory::Internal);
+    BSKY_RUNTIME_CHECK(throwing_fault.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(runtime) == 0U);
+    BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+
+    auto rejection_runtime = external(1U);
+    Access::inject_fault(rejection_runtime, Fault::DeliveryRejectionError);
+    auto callback_rejection = rejection_runtime.submit(
+        [&rejection_runtime](CancellationToken) {
+            Access::close_executor(rejection_runtime);
+            return Result<void>::success();
+        }, [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(callback_rejection);
+    BSKY_RUNTIME_CHECK(rejection_runtime.process_once());
+    BSKY_RUNTIME_CHECK(callback_rejection.value().is_completed());
+    BSKY_RUNTIME_CHECK(callback_rejection.value().error_category() == ErrorCategory::Shutdown);
+    BSKY_RUNTIME_CHECK(callback_rejection.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(rejection_runtime) == 0U);
+    BSKY_RUNTIME_CHECK(rejection_runtime.shutdown(1s));
 }
 
 void independent_runtimes_and_concurrent_stop() {
@@ -380,6 +431,7 @@ int main() {
     }
     concurrent_admission_cancel_stop();
     terminal_allocation_failure();
+    execute_terminal_faults();
     independent_runtimes_and_concurrent_stop();
     external_finalization_handoff();
     self_shutdown_and_destruction(RuntimeMode::External);

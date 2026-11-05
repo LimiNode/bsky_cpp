@@ -30,10 +30,11 @@ There is no inline callback fallback. The callback slot is reserved before the
 terminal result is committed; failure to reserve it can therefore be reported
 without rewriting a previously committed result. Work exceptions become
 `Internal`; callback exceptions are contained after the terminal result is set.
-The stop and cancellation entry points are `noexcept`: they do not allocate a
-snapshot of the registry, and an allocation failure while constructing a
-terminal error falls back to a typed category, suppresses delivery, and still
-releases the callback capture after work cleanup.
+Terminalization is an exception boundary: allocation or dispatch failure after
+admission enters an emergency terminal path, suppresses delivery when needed,
+and still releases callback/work captures before registry retirement. The stop
+and cancellation entry points are `noexcept`; they do not allocate a snapshot
+of the registry, and their terminal-error construction has the same fallback.
 
 `close()` suppresses a not-yet-started registration. An executing callback
 finishes normally. `await_quiescence()` waits until delivery is completed or
@@ -71,6 +72,13 @@ Concurrent submit, cancellation, close, and shutdown are supported. Moving or
 destroying a particular public object must not race ordinary access to that
 same object. Execution methods take a local core lease, permitting runtime
 destruction from inside an invocation on that executor.
+
+The allocation-free stop path marks operations one at a time while the core
+mutex is released for user-capture cleanup. With the current bounded admission
+model its worst-case registry traversal is O(n²) in `max_in_flight`; the normal
+runtime limit is deliberately small, and the race/lifetime suite exercises the
+configured bound. A future larger-capacity runtime should replace this with a
+stable intrusive stop order rather than allocating from `noexcept` stop.
 
 ## Stop and shutdown
 
