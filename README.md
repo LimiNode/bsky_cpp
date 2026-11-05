@@ -7,8 +7,8 @@ framework and it does not contain AI/LLM character logic. The M0 milestones
 provide the C++17 scaffold, `Result`, typed `Error`, cooperative cancellation,
 and the documented async contract. M1a adds strict value types for AT Protocol
 identifiers; M1b adds the transport-neutral request/response seam and fake
-transport. The network client, XRPC, and async executor implementation remain
-deferred.
+transport; M1c adds an opt-in event-hub-backed operation runtime. The network
+client and XRPC implementation remain deferred.
 
 ## Documentation
 
@@ -23,8 +23,12 @@ deferred.
 - [ADR-0002](docs/adr/0002-async-execution-contract.md)
 - [Reference scenarios](docs/reference-scenarios.md)
 
-The canonical documentation language is English. M0c examples are conceptual
-and do not imply an implemented network or executor API.
+The canonical documentation language is English. M0c examples remain
+conceptual; the implemented runtime is selected with `BSKY_BUILD_RUNTIME=ON`.
+
+The M1c Draft currently runs non-blocking `Result<void>` work. Its precise
+lifecycle, install-component usage, and remaining gates are documented in
+[OPERATION_RUNTIME.md](docs/contracts/OPERATION_RUNTIME.md).
 
 ## Includes
 

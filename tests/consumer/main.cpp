@@ -1,6 +1,12 @@
 #include <bsky_cpp.hpp>
 
+#ifdef BSKY_CONSUMER_RUNTIME
+#include <bsky_cpp/runtime/runtime.hpp>
+#endif
+
 #include <string>
+#include <chrono>
+#include <atomic>
 
 int main() {
     bsky_cpp::Result<int> result(42);
@@ -47,5 +53,22 @@ int main() {
     if (!request || !response) {
         return 1;
     }
+#ifdef BSKY_CONSUMER_RUNTIME
+    if (std::string(bsky_cpp::error_category_name(
+            bsky_cpp::ErrorCategory::QuiescencePending)) != "quiescence_pending" ||
+        std::string(bsky_cpp::error_category_name(
+            bsky_cpp::ErrorCategory::ShutdownTimedOut)) != "shutdown_timed_out") return 1;
+    bsky_cpp::runtime::Runtime runtime;
+    if (!runtime.start()) return 1;
+    std::atomic<bool> delivered{false};
+    auto operation = runtime.submit([](bsky_cpp::CancellationToken) {
+        return bsky_cpp::Result<void>::success();
+    }, [&](bsky_cpp::Result<void> completion) { delivered = completion.has_value(); });
+    if (!operation || !operation.value().wait_for_completion(std::chrono::seconds(1)) ||
+        !operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
+        !delivered || !runtime.shutdown(std::chrono::seconds(1))) {
+        return 1;
+    }
+#endif
     return 0;
 }

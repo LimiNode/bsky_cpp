@@ -3,19 +3,20 @@
 **Status:** research-only, Draft milestone material. No dependency is added to
 `external/` by this document and no upstream source is modified.
 
-This audit records what was verified from exact upstream snapshots before any
-M1c implementation. Paths and line numbers refer to the detached source trees
+This audit records what was verified from exact upstream snapshots before and
+during the M1c implementation. Paths and line numbers refer to the detached source trees
 under `build/dependency-audit/`; the SHA is part of the evidence and must be
 rechecked when a dependency is updated.
 
 | Repository | Exact audited commit | Proposed owner | Current decision |
 | --- | --- | --- | --- |
-| `event-hub-cpp` | `2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0` | upstream project, with a bsky adapter | required runtime infrastructure for the future production async Client; defer integration until M1c |
+| `event-hub-cpp` | `2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0` | upstream project, with a bsky adapter | required runtime infrastructure for the opt-in M1c operation runtime |
 | `kurlyk` | `b62cd53f672c47b74bb14d762ea9dc59a9df19ce` | upstream project, with a bsky transport adapter | reuse native async path; keep the public seam transport-neutral; defer OAuth profile work |
 | `time-shield-cpp` | `d5f1203f24341e4146af35d5bb36e762056d181f` | upstream project, with a bsky time adapter | reuse clock/calendar primitives after conformance gate; propose upstream parser fix |
 
 The words “reuse” and “adapter” below are design decisions, not evidence that
-the corresponding integration exists in `bsky_cpp`. M1c remains unimplemented.
+the corresponding integration exists in `bsky_cpp`. The M1c event-hub
+integration is now implemented in `src/bsky_cpp/runtime/`.
 
 ## Evidence and capability matrix
 
@@ -23,7 +24,7 @@ the corresponding integration exists in `bsky_cpp`. M1c remains unimplemented.
 
 | Capability | Existing API and source evidence | Decision | Missing guarantee / test | Owner / milestone |
 | --- | --- | --- | --- | --- |
-| Hub lifecycle | `ModuleHub::run()` and `start()` initialize modules, run a blocking or background loop, shut down, and rethrow background exceptions (`event-hub-cpp/include/event_hub/module_hub.hpp:279-325`, SHA above). `ModuleExecutionMode` provides `inline_in_hub`, `private_thread`, and `manual` (`module.hpp:26-31`). | Reuse directly through a thin `RuntimeAdapter`; expose managed mode only after M1c. | Need a deterministic test for client destruction, shutdown deadline, and callback quiescence across all module modes. | upstream + bsky adapter, M1c |
+| Hub lifecycle | `ModuleHub::run()` and `start()` initialize modules, run a blocking or background loop, shut down, and rethrow background exceptions (`event-hub-cpp/include/event_hub/module_hub.hpp:279-325`, SHA above). `ModuleExecutionMode` provides `inline_in_hub`, `private_thread`, and `manual` (`module.hpp:26-31`). | Reuse directly through the M1c runtime adapter; managed mode carries the documented awaiter limitation. | Need a deterministic test for client destruction, shutdown deadline, and callback quiescence across all module modes. | upstream + bsky adapter, M1c |
 | External/manual execution | `ModuleHub::process_once()` delegates to `process()` (`module_hub.hpp:201-204`); `set_notifier()` wires a non-owning notifier (`module_hub.hpp:264-270`). `RunLoop::process_once()` and `run_until()` aggregate buses and task managers and wait on notifier/deadlines (`run_loop.hpp:129-186`). | Thin adapter in external mode; caller drives `process_once()` and uses a notifier plus deadline hint. | Adapter must not retain a borrowed notifier past its documented lifetime; use controlled fake execution for operation state and bounded real-clock scheduler tests because upstream has no clock injection. | bsky adapter, M1c |
 | Tasks, delay, periodic work | `TaskManager` supports ready/delayed/periodic tasks, `post_every_after`, `cancel`, `next_deadline`, and `TaskContext` cancellation/reschedule (`task_manager.hpp:199-275`, `535-607`, `737-771`, `988-1077`). Periodic scheduling is fixed-delay or fixed-rate (`task.hpp:95-117`). | Reuse directly; do not implement a second task manager. | `TaskManager` is single-consumer for `process()` and has no queue capacity. Test admission/backpressure at the bsky boundary, not by assuming an upstream bound. | upstream + bsky policy, M1c |
 | Priorities and fairness | Three FIFO ready queues are selected high, normal, low (`task.hpp:95-105`; `task_manager.hpp:1120-1129`). | Reuse priority levels as an implementation detail only. | No starvation/fairness guarantee is documented. Add a bounded mixed-priority deterministic test before promising fairness. | bsky conformance, M1c |
@@ -40,8 +41,9 @@ the corresponding integration exists in `bsky_cpp`. M1c remains unimplemented.
 Managed mode means the production runtime owns a `ModuleHub` lifetime lease and
 calls `start()`/`run()` according to the selected thread policy. Ordinary task
 execution may proceed with a documented limitation, but managed timed awaiter
-delivery, timeout-driven cleanup, and shutdown wake-up are not guaranteed until
-the complete upstream deadline-and-wake-up correction lands.
+delivery and timeout-driven cleanup are not guaranteed until the complete
+upstream deadline-and-wake-up correction lands. Explicit
+`ModuleHub::request_stop()` already wakes local/external notifiers.
 External mode means the application owns the loop: the adapter installs a
 notifier, calls `process_once()`, and computes a wait from all task,
 event-awaiter, and transport deadlines. The adapter must not build a parallel
@@ -55,7 +57,7 @@ notifying the loop; a sleeping loop therefore needs a notifier wake-up when new
 work appears or a newly registered deadline becomes earlier. External mode must
 aggregate `EventBus::next_awaiter_deadline()` explicitly. Managed mode must
 require the complete upstream correction before promising timeout delivery,
-shutdown wake-up, or timeout-driven lifetime cleanup. The minimum deterministic
+or timeout-driven lifetime cleanup. The minimum deterministic
 regression coverage is:
 
 1. create a hub with an inline module and a queued event-bus awaiter with a

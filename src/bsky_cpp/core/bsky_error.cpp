@@ -99,12 +99,18 @@ const char* error_category_name(ErrorCategory category) noexcept {
             return "authorization";
         case ErrorCategory::RateLimited:
             return "rate_limited";
+        case ErrorCategory::Backpressure:
+            return "backpressure";
         case ErrorCategory::Conflict:
             return "conflict";
         case ErrorCategory::OutcomeUnknown:
             return "outcome_unknown";
         case ErrorCategory::Internal:
             return "internal";
+        case ErrorCategory::QuiescencePending:
+            return "quiescence_pending";
+        case ErrorCategory::ShutdownTimedOut:
+            return "shutdown_timed_out";
     }
     return "internal";
 }

@@ -14,9 +14,10 @@ option(BSKY_BUILD_TESTS "Build bsky_cpp tests" ${BUILD_TESTING})
 option(BSKY_BUILD_EXAMPLES "Build bsky_cpp examples" OFF)
 option(BSKY_ENABLE_SANITIZERS "Enable address and undefined-behaviour sanitizers" OFF)
 option(BSKY_BUILD_DOCUMENTATION "Build bsky_cpp Doxygen documentation" OFF)
+option(BSKY_BUILD_RUNTIME "Build the optional event-hub-backed operation runtime" OFF)
 
 # Explicit install surface; add public .ipp/.tpp fragments here when needed.
-set(BSKY_PUBLIC_HEADERS
+set(BSKY_FOUNDATION_PUBLIC_HEADERS
     src/bsky_cpp.hpp
     src/bsky_cpp/core/bsky_error.hpp
     src/bsky_cpp/core/cancellation.hpp
@@ -25,6 +26,14 @@ set(BSKY_PUBLIC_HEADERS
     src/bsky_cpp/atproto/identifiers.hpp
     src/bsky_cpp/transport/transport.hpp
 )
+
+set(BSKY_RUNTIME_PUBLIC_HEADERS
+    src/bsky_cpp/runtime/runtime.hpp
+)
+set(BSKY_PUBLIC_HEADERS ${BSKY_FOUNDATION_PUBLIC_HEADERS})
+if(BSKY_BUILD_RUNTIME)
+    list(APPEND BSKY_PUBLIC_HEADERS ${BSKY_RUNTIME_PUBLIC_HEADERS})
+endif()
 
 # Canonical public-header names, derived from the source allowlist. Every
 # install, documentation, and compile-only API check is generated from this
@@ -76,6 +85,54 @@ endfunction()
 
 if(BSKY_ENABLE_SANITIZERS)
     bsky_cpp_enable_sanitizers(bsky_cpp)
+endif()
+
+if(BSKY_BUILD_RUNTIME)
+    # Prefer an existing/installed target. Source fallback composes the one
+    # pinned submodule with optional upstream integrations disabled locally.
+    function(bsky_cpp_find_event_hub)
+        if(TARGET event_hub::event_hub)
+            return()
+        endif()
+        find_package(event-hub-cpp CONFIG QUIET)
+        if(TARGET event_hub::event_hub)
+            return()
+        endif()
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/event-hub-cpp/CMakeLists.txt")
+            message(FATAL_ERROR "Install event-hub-cpp or run: git submodule update --init external/event-hub-cpp")
+        endif()
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        set(EVENT_HUB_CPP_BUILD_EXAMPLES OFF)
+        set(EVENT_HUB_CPP_BUILD_TESTS OFF)
+        set(EVENT_HUB_CPP_USE_TIME_SHIELD OFF)
+        set(EVENT_HUB_CPP_USE_TIME_SHIELD_NTP OFF)
+        add_subdirectory(external/event-hub-cpp ${CMAKE_CURRENT_BINARY_DIR}/external/event-hub-cpp)
+    endfunction()
+    bsky_cpp_find_event_hub()
+
+    find_package(Threads REQUIRED)
+    add_library(bsky_cpp_runtime STATIC
+        src/bsky_cpp/runtime/runtime.cpp
+    )
+    add_library(bsky_cpp::runtime ALIAS bsky_cpp_runtime)
+    target_compile_features(bsky_cpp_runtime PUBLIC cxx_std_17)
+    target_include_directories(bsky_cpp_runtime
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    target_link_libraries(bsky_cpp_runtime
+        PUBLIC bsky_cpp::bsky_cpp event_hub::event_hub Threads::Threads
+    )
+    set_target_properties(bsky_cpp_runtime PROPERTIES EXPORT_NAME runtime)
+    if(MSVC)
+        target_compile_options(bsky_cpp_runtime PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(bsky_cpp_runtime PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    if(BSKY_ENABLE_SANITIZERS)
+        bsky_cpp_enable_sanitizers(bsky_cpp_runtime)
+    endif()
 endif()
 
 if(BSKY_BUILD_TESTS)
@@ -133,6 +190,20 @@ configure_package_config_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfig.cmake"
     INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/bsky_cpp"
 )
+
+if(BSKY_BUILD_RUNTIME)
+    install(TARGETS bsky_cpp_runtime
+        EXPORT bsky_cppRuntimeTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    install(EXPORT bsky_cppRuntimeTargets
+        FILE bsky_cppRuntimeTargets.cmake
+        NAMESPACE bsky_cpp::
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/bsky_cpp"
+    )
+endif()
 
 install(EXPORT bsky_cppTargets
     FILE bsky_cppTargets.cmake

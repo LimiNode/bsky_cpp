@@ -3,10 +3,19 @@ project(bsky_cpp_consumer LANGUAGES CXX)
 
 include(CTest)
 
-find_package(bsky_cpp CONFIG REQUIRED)
+option(BSKY_CONSUMER_RUNTIME "Exercise the installed runtime target" OFF)
+if(BSKY_CONSUMER_RUNTIME)
+    find_package(bsky_cpp CONFIG REQUIRED COMPONENTS runtime)
+else()
+    find_package(bsky_cpp CONFIG REQUIRED)
+endif()
 
 add_executable(bsky_cpp_consumer main.cpp)
 target_compile_features(bsky_cpp_consumer PRIVATE cxx_std_17)
 target_link_libraries(bsky_cpp_consumer PRIVATE bsky_cpp::bsky_cpp)
+if(BSKY_CONSUMER_RUNTIME)
+    target_compile_definitions(bsky_cpp_consumer PRIVATE BSKY_CONSUMER_RUNTIME=1)
+    target_link_libraries(bsky_cpp_consumer PRIVATE bsky_cpp::runtime)
+endif()
 
 add_test(NAME bsky_cpp.consumer COMMAND bsky_cpp_consumer)

@@ -87,7 +87,7 @@ invariant or contract from an earlier one.
 - **Deferred:** async operation admission/execution (M1c), XRPC encoding and
   protocol mapping (M1d), identity resolution, and network adapters.
 
-### M1c — Operation runtime (planned)
+### M1c — Operation runtime (partial Draft, pending source review)
 
 - **Prerequisites:** M1b, ADR-0002, and ADR-0004. Managed task execution may
   proceed with the explicitly documented event-hub awaiter limitation; the
@@ -104,7 +104,11 @@ invariant or contract from an earlier one.
   adapters; no parallel TaskManager/EventBus/network worker is implemented;
   all ADR-0002 guarantees that do not depend on the upstream awaiter fix are
   covered by deterministic tests, with the managed limitation recorded in the
-  conformance report.
+  conformance report. The opt-in `bsky_cpp::runtime` target implements the
+  non-blocking void-operation subset documented in
+  [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md); typed result work,
+  public executor injection, a blocking-transport bridge, and operation
+  deadlines remain unimplemented. The broader acceptance gate is still open.
 - **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
   rate-limit partitions, header conversion, Lexicon datetime integration,
   WebSocket, replay, persistence, and OAuth.
