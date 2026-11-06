@@ -205,7 +205,8 @@ using CompletionCallback = MoveOnlyFunction<void(Result<void>)>;
 /// Object destruction/moving must not race access to that same Runtime object.
 /// Work, callbacks, notifier calls, and capture destructors must be short.
 /// No network I/O, blocking-transport bridge, future adapter, or operation
-/// deadlines are implemented here. Managed timed awaiters remain upstream-gated.
+/// deadlines are implemented here. Managed timed awaiters rely on the pinned
+/// event-hub-cpp deadline aggregation and registration wake-up correction.
 class Runtime {
 public:
     /// Monotonic clock type used for runtime deadlines.

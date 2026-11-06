@@ -36,13 +36,14 @@ A document, example, or roadmap item is not evidence of an implementation.
   remaining gates. Full M1c is not yet complete or independently approved.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
-  accepted documentation contract. Managed timed awaiter guarantees in M1c
-  remain gated by the upstream event-hub correction.
+  accepted documentation contract. Managed timed awaiter guarantees in the
+  partial M1c runtime are covered by the pinned event-hub-cpp PR #13 merge.
 - Stage 2 dependency reuse audit: the pinned `event-hub-cpp` snapshot is
   integrated only by the opt-in M1c runtime target; the foundation target still
-  has no runtime dependency. Ownership decisions and the upstream awaiter gate
-  remain recorded in [`DEPENDENCY_REUSE_AUDIT.md`](research/DEPENDENCY_REUSE_AUDIT.md)
-  and ADR-0004.
+  has no runtime dependency. The current gitlink is the upstream PR #13 merge
+  commit; ownership and compatibility decisions remain recorded in
+  [`DEPENDENCY_REUSE_AUDIT.md`](research/DEPENDENCY_REUSE_AUDIT.md) and
+  ADR-0004.
 
 ## Contract-only
 

@@ -112,7 +112,8 @@ All private fixtures remain under `runtime/detail/` and are not installed.
 existing or installed `event_hub::event_hub` target; otherwise it composes the
 pinned direct submodule once, with upstream tests/examples/Time Shield/NTP
 disabled in function-local option scope (no forced parent cache changes).
-The managed snapshot is `2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0`.
+The managed snapshot is `e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3`, the merge
+commit for upstream event-hub-cpp PR #13.
 Event-hub uses the MIT license, has no required network dependency, and its
 reviewed API remains behind the runtime boundary. Replacing it requires
 revalidating scheduler/lifecycle conformance and the exported runtime target.
@@ -143,11 +144,11 @@ Assertions fail the test process in Debug and Release. No sleep is used for
 test synchronization. Installed consumers and package-isolation checks run in
 CI together with runtime OFF/ON, Doxygen and Ubuntu ASan/UBSan.
 
-Managed timed awaiters are not guaranteed on the pinned snapshot. The separate
-[event-hub PR #13](https://github.com/LimiNode/event-hub-cpp/pull/13) must be
-accepted and integrated before that claim. Explicit `ModuleHub::request_stop()`
-already wakes its loop; the limitation concerns awaiter registration/deadline
-aggregation, not that explicit wakeup.
+Managed timed awaiters are supported by the pinned snapshot. Upstream PR #13
+adds queued awaiter deadline aggregation to `ModuleHub` and notifies the loop
+after awaiter registration, including when a newly registered deadline is
+earlier than the current wait. Explicit `ModuleHub::request_stop()` continues
+to wake its loop.
 
 Still unimplemented: typed value-result operations, injected public executors,
 the blocking-transport bridge, operation deadlines, future adapters, high-level
