@@ -210,20 +210,9 @@ using TypedCompletionCallback = MoveOnlyFunction<void(Result<T>)>;
 
 namespace detail {
 
-/// Bridges one typed operation through the existing void lifecycle.
+/// Shared typed terminal payload slot. It owns no user work or callback.
 template <typename T>
-struct TypedOperationBridge {
-    /// Stores the typed work and callback until terminal delivery.
-    /// \param operation Typed work body.
-    /// \param completion Optional typed callback.
-    TypedOperationBridge(TypedOperationWork<T> operation,
-                         TypedCompletionCallback<T> completion)
-        : work(std::move(operation)), callback(std::move(completion)) {}
-
-    /// Owned typed work body.
-    TypedOperationWork<T> work;
-    /// Owned one-shot callback, if supplied.
-    TypedCompletionCallback<T> callback;
+struct TypedResultSlot {
     /// Terminal typed result retained until callback delivery.
     std::shared_ptr<Result<T>> result;
 };
@@ -285,6 +274,9 @@ public:
     ///
     /// The typed payload is moved into the callback channel. It is not
     /// available through `OperationHandle`, and no hidden copy is made.
+    /// Work and callback captures have independent ownership: closing the
+    /// callback releases its captures even while queued work remains, while
+    /// a running callback retains its captures until it returns.
     ///
     /// \tparam T Successful value type.
     /// \param work Typed operation body.
@@ -303,36 +295,37 @@ public:
                 "runtime.submit_typed"));
         }
 
-        auto bridge = std::make_shared<detail::TypedOperationBridge<T>>(
-            std::move(work), std::move(callback));
+        auto slot = std::make_shared<detail::TypedResultSlot<T>>();
 
-        OperationWork erased_work = [bridge](CancellationToken token) mutable {
-            auto typed = bridge->work(token);
-            bridge->result = std::make_shared<Result<T>>(std::move(typed));
-            if (*bridge->result) {
+        OperationWork erased_work = [work = std::move(work), slot](
+                                        CancellationToken token) mutable {
+            auto typed = work(token);
+            slot->result = std::make_shared<Result<T>>(std::move(typed));
+            if (*slot->result) {
                 return Result<void>::success();
             }
-            return Result<void>::failure(Error(bridge->result->error()));
+            return Result<void>::failure(Error(slot->result->error()));
         };
 
         CompletionCallback erased_callback;
-        if (bridge->callback) {
-            erased_callback = [bridge](Result<void> terminal) mutable {
+        if (callback) {
+            erased_callback = [callback = std::move(callback), slot](
+                                  Result<void> terminal) mutable {
                 if (!terminal) {
-                    bridge->result.reset();
-                    bridge->callback(Result<T>::failure(
+                    slot->result.reset();
+                    callback(Result<T>::failure(
                         Error(terminal.error())));
                     return;
                 }
 
-                if (bridge->result) {
-                    auto typed = std::move(*bridge->result);
-                    bridge->result.reset();
-                    bridge->callback(std::move(typed));
+                if (slot->result) {
+                    auto typed = std::move(*slot->result);
+                    slot->result.reset();
+                    callback(std::move(typed));
                     return;
                 }
 
-                bridge->callback(Result<T>::failure(Error(
+                callback(Result<T>::failure(Error(
                     ErrorCategory::Internal,
                     "typed result was not produced",
                     "runtime.typed_operation")));

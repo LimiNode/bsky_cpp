@@ -380,6 +380,53 @@ void concurrent_admission_cancel_stop() {
     }
 }
 
+void racing_admission_cancel_stop() {
+    for (int round = 0; round != 1; ++round) {
+        auto runtime = external(64U);
+        Gate start, producer_ready, release_race;
+        std::atomic<int> callbacks{0};
+        auto initial = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+        BSKY_RUNTIME_CHECK(initial);
+        std::vector<OperationHandle> admitted;
+        std::thread producer([&] {
+            start.wait();
+            producer_ready.signal();
+            release_race.wait();
+            for (int n = 0; n != 32; ++n) {
+                auto result = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+                if (result) admitted.push_back(result.value());
+                else BSKY_RUNTIME_CHECK(result.error().category() == ErrorCategory::Shutdown ||
+                                        result.error().category() == ErrorCategory::Backpressure);
+            }
+        });
+        std::thread canceller([&] {
+            start.wait();
+            initial.value().request_cancellation();
+            initial.value().request_cancellation();
+        });
+        std::thread stopper([&] {
+            start.wait();
+            producer_ready.wait();
+            release_race.signal();
+            BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        });
+        start.signal();
+        producer.join();
+        canceller.join();
+        stopper.join();
+        admitted.push_back(initial.value());
+        for (auto& handle : admitted) {
+            BSKY_RUNTIME_CHECK(handle.is_completed() &&
+                               handle.await_callback_quiescence(0ms));
+            BSKY_RUNTIME_CHECK(handle.error_category() == ErrorCategory::Shutdown ||
+                               handle.error_category() == ErrorCategory::Cancelled);
+        }
+        BSKY_RUNTIME_CHECK(callbacks == 0);
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(!runtime.submit(success()));
+    }
+}
+
 void self_shutdown_and_destruction(RuntimeMode mode) {
     auto runtime = std::make_unique<Runtime>(RuntimeOptions{mode, 2U, {}});
     BSKY_RUNTIME_CHECK(runtime->start());
@@ -559,6 +606,134 @@ void typed_operations() {
     BSKY_RUNTIME_CHECK(managed_delivered.load());
     BSKY_RUNTIME_CHECK(managed.shutdown(1s));
 }
+
+void typed_callback_lifetime() {
+    auto runtime = external(1U);
+    std::atomic<bool> work_ran{false};
+    auto callback_marker = std::make_shared<int>(1);
+    std::weak_ptr<int> callback_weak = callback_marker;
+    auto queued = runtime.submit_typed<int>(
+        [&work_ran](CancellationToken) {
+            work_ran = true;
+            return Result<int>::success(1);
+        },
+        [callback_marker](Result<int>) { BSKY_RUNTIME_CHECK(false); });
+    BSKY_RUNTIME_CHECK(queued);
+    callback_marker.reset();
+    queued.value().close_callback();
+    BSKY_RUNTIME_CHECK(queued.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callback_weak.expired());
+    BSKY_RUNTIME_CHECK(!work_ran.load());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(work_ran.load());
+    BSKY_RUNTIME_CHECK(queued.value().is_completed());
+    BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+
+    auto blocked_runtime = external(1U);
+    Gate entered, release;
+    auto blocked_marker = std::make_shared<int>(2);
+    std::weak_ptr<int> blocked_weak = blocked_marker;
+    auto blocked = blocked_runtime.submit_typed<int>(
+        [&](CancellationToken) {
+            entered.signal();
+            release.wait();
+            return Result<int>::success(2);
+        },
+        [blocked_marker](Result<int>) { BSKY_RUNTIME_CHECK(false); });
+    BSKY_RUNTIME_CHECK(blocked);
+    blocked_marker.reset();
+    std::thread consumer([&] { BSKY_RUNTIME_CHECK(blocked_runtime.process_once()); });
+    entered.wait();
+    blocked.value().close_callback();
+    BSKY_RUNTIME_CHECK(blocked.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(blocked_weak.expired());
+    release.signal();
+    consumer.join();
+    BSKY_RUNTIME_CHECK(blocked.value().is_completed());
+    BSKY_RUNTIME_CHECK(blocked_runtime.shutdown(1s));
+}
+
+void typed_terminal_races_and_faults() {
+    auto runtime = external(2U);
+    std::atomic<int> callbacks{0};
+
+    auto committed = runtime.submit_typed<int>(
+        [](CancellationToken) { return Result<int>::success(7); },
+        [&callbacks](Result<int> result) {
+            BSKY_RUNTIME_CHECK(result && result.value() == 7);
+            ++callbacks;
+        });
+    BSKY_RUNTIME_CHECK(committed);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    committed.value().request_cancellation();
+    BSKY_RUNTIME_CHECK(committed.value().error_category() == std::nullopt);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(callbacks == 1);
+
+    Gate entered, release;
+    std::atomic<int> cancelled_callbacks{0};
+    auto running = runtime.submit_typed<int>(
+        [&](CancellationToken) {
+            entered.signal();
+            release.wait();
+            return Result<int>::success(8);
+        },
+        [&cancelled_callbacks](Result<int> result) {
+            BSKY_RUNTIME_CHECK(!result &&
+                               result.error().category() == ErrorCategory::Cancelled);
+            ++cancelled_callbacks;
+        });
+    BSKY_RUNTIME_CHECK(running);
+    std::thread consumer([&] { BSKY_RUNTIME_CHECK(runtime.process_once()); });
+    entered.wait();
+    running.value().request_cancellation();
+    BSKY_RUNTIME_CHECK(running.value().is_completed());
+    BSKY_RUNTIME_CHECK(running.value().error_category() == ErrorCategory::Cancelled);
+    BSKY_RUNTIME_CHECK(!running.value().await_callback_quiescence(0ms));
+    release.signal();
+    consumer.join();
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(running.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(cancelled_callbacks == 1);
+
+    auto fault_runtime = external(1U);
+    std::atomic<bool> fault_callback{false};
+    auto fault_marker = std::make_shared<int>(3);
+    std::weak_ptr<int> fault_weak = fault_marker;
+    Access::inject_fault(fault_runtime, Fault::Terminalization);
+    auto faulted = fault_runtime.submit_typed<std::unique_ptr<int>>(
+        [](CancellationToken) {
+            return Result<std::unique_ptr<int>>::success(std::make_unique<int>(3));
+        },
+        [fault_marker, &fault_callback](Result<std::unique_ptr<int>>) {
+            fault_callback = true;
+        });
+    BSKY_RUNTIME_CHECK(faulted);
+    fault_marker.reset();
+    BSKY_RUNTIME_CHECK(fault_runtime.process_once());
+    BSKY_RUNTIME_CHECK(faulted.value().is_completed());
+    BSKY_RUNTIME_CHECK(faulted.value().error_category() == ErrorCategory::Internal);
+    BSKY_RUNTIME_CHECK(faulted.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(!fault_callback && fault_weak.expired());
+    BSKY_RUNTIME_CHECK(Access::registered_operations(fault_runtime) == 0U);
+    BSKY_RUNTIME_CHECK(fault_runtime.shutdown(1s));
+
+    std::atomic<int> throwing_callbacks{0};
+    auto throwing_callback = runtime.submit_typed<int>(
+        [](CancellationToken) { return Result<int>::success(9); },
+        [&throwing_callbacks](Result<int>) {
+            ++throwing_callbacks;
+            throw 9;
+        });
+    BSKY_RUNTIME_CHECK(throwing_callback);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(throwing_callbacks == 1);
+    BSKY_RUNTIME_CHECK(throwing_callback.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+    BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+}
 } // namespace
 
 int main() {
@@ -571,6 +746,7 @@ int main() {
         running_work_and_callback_quiescence(true, mode);
     }
     concurrent_admission_cancel_stop();
+    racing_admission_cancel_stop();
     terminal_allocation_failure();
     execute_terminal_faults();
     independent_runtimes_and_concurrent_stop();
@@ -579,4 +755,6 @@ int main() {
     self_shutdown_and_destruction(RuntimeMode::Managed);
     notifier_and_move_assignment();
     typed_operations();
+    typed_callback_lifetime();
+    typed_terminal_races_and_faults();
 }
