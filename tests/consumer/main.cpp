@@ -7,6 +7,7 @@
 #include <string>
 #include <chrono>
 #include <atomic>
+#include <memory>
 
 int main() {
     bsky_cpp::Result<int> result(42);
@@ -67,6 +68,25 @@ int main() {
     if (!operation || !operation.value().wait_for_completion(std::chrono::seconds(1)) ||
         !operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
         !delivered || !runtime.shutdown(std::chrono::seconds(1))) {
+        return 1;
+    }
+
+    bsky_cpp::runtime::Runtime typed_runtime;
+    if (!typed_runtime.start()) return 1;
+    std::atomic<bool> typed_delivered{false};
+    auto typed_operation = typed_runtime.submit_typed<std::unique_ptr<int>>(
+        [](bsky_cpp::CancellationToken) {
+            return bsky_cpp::Result<std::unique_ptr<int>>::success(
+                std::make_unique<int>(42));
+        },
+        [&typed_delivered](bsky_cpp::Result<std::unique_ptr<int>> completion) {
+            typed_delivered = completion && completion.value() &&
+                              *completion.value() == 42;
+        });
+    if (!typed_operation ||
+        !typed_operation.value().wait_for_completion(std::chrono::seconds(1)) ||
+        !typed_operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
+        !typed_delivered || !typed_runtime.shutdown(std::chrono::seconds(1))) {
         return 1;
     }
 #endif

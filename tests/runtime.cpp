@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -342,6 +343,7 @@ void concurrent_admission_cancel_stop() {
     for (int round = 0; round != 40; ++round) {
         auto runtime = external(64U);
         Gate start;
+        Gate admissions_done;
         std::atomic<int> calls{0};
         auto initial = runtime.submit(success(), [&](Result<void>) { ++calls; });
         BSKY_RUNTIME_CHECK(initial);
@@ -353,13 +355,18 @@ void concurrent_admission_cancel_stop() {
                 if (result) admitted.push_back(result.value());
                 else BSKY_RUNTIME_CHECK(result.error().category() == ErrorCategory::Shutdown);
             }
+            admissions_done.signal();
         });
         std::thread canceller([&] {
             start.wait();
             initial.value().request_cancellation();
             initial.value().request_cancellation();
         });
-        std::thread stopper([&] { start.wait(); BSKY_RUNTIME_CHECK(runtime.shutdown(1s)); });
+        std::thread stopper([&] {
+            start.wait();
+            admissions_done.wait();
+            BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        });
         start.signal();
         producer.join(); canceller.join(); stopper.join();
         admitted.push_back(initial.value());
@@ -418,6 +425,140 @@ void notifier_and_move_assignment() {
     Runtime zero({RuntimeMode::Managed, 0U, {}});
     BSKY_RUNTIME_CHECK(!zero.start());
 }
+
+void typed_operations() {
+    auto runtime = external(2U);
+    std::atomic<int> callbacks{0};
+
+    auto invalid = runtime.submit_typed<int>({}, {});
+    BSKY_RUNTIME_CHECK(!invalid &&
+                       invalid.error().category() == ErrorCategory::InvalidArgument);
+
+    auto success_result = runtime.submit_typed<int>(
+        [](CancellationToken) { return Result<int>::success(42); },
+        [&callbacks](Result<int> result) {
+            BSKY_RUNTIME_CHECK(result && result.value() == 42);
+            ++callbacks;
+        });
+    BSKY_RUNTIME_CHECK(success_result);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(success_result.value().is_completed());
+    BSKY_RUNTIME_CHECK(!success_result.value().error_category());
+    BSKY_RUNTIME_CHECK(success_result.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callbacks == 1);
+
+    auto error_result = runtime.submit_typed<int>(
+        [](CancellationToken) {
+            return Result<int>::failure(Error(
+                ErrorCategory::Protocol, "typed failure", "runtime.test"));
+        },
+        [&callbacks](Result<int> result) {
+            BSKY_RUNTIME_CHECK(!result &&
+                               result.error().category() == ErrorCategory::Protocol &&
+                               result.error().message() == "typed failure");
+            ++callbacks;
+        });
+    BSKY_RUNTIME_CHECK(error_result);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(error_result.value().error_category() ==
+                       ErrorCategory::Protocol);
+    BSKY_RUNTIME_CHECK(callbacks == 2);
+
+    std::atomic<bool> work_ran{false};
+    auto cancelled = runtime.submit_typed<int>(
+        [&work_ran](CancellationToken) {
+            work_ran = true;
+            return Result<int>::success(9);
+        },
+        [&callbacks](Result<int> result) {
+            BSKY_RUNTIME_CHECK(!result &&
+                               result.error().category() == ErrorCategory::Cancelled);
+            ++callbacks;
+        });
+    BSKY_RUNTIME_CHECK(cancelled);
+    cancelled.value().request_cancellation();
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(!work_ran.load());
+    BSKY_RUNTIME_CHECK(cancelled.value().error_category() == ErrorCategory::Cancelled);
+    BSKY_RUNTIME_CHECK(callbacks == 3);
+
+    std::atomic<bool> move_only_delivered{false};
+    auto move_only = runtime.submit_typed<std::unique_ptr<int>>(
+        [payload = std::make_unique<int>(7)](CancellationToken) mutable {
+            return Result<std::unique_ptr<int>>::success(std::move(payload));
+        },
+        [capture = std::make_unique<int>(11), &move_only_delivered](
+            Result<std::unique_ptr<int>> result) mutable {
+            BSKY_RUNTIME_CHECK(result && result.value() &&
+                               *result.value() == 7 && *capture == 11);
+            move_only_delivered = true;
+        });
+    BSKY_RUNTIME_CHECK(move_only);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(move_only_delivered.load());
+
+    auto throwing = runtime.submit_typed<int>(
+        [](CancellationToken) -> Result<int> { throw 17; },
+        [&callbacks](Result<int> result) {
+            BSKY_RUNTIME_CHECK(!result &&
+                               result.error().category() == ErrorCategory::Internal);
+            ++callbacks;
+        });
+    BSKY_RUNTIME_CHECK(throwing);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(throwing.value().error_category() == ErrorCategory::Internal);
+    BSKY_RUNTIME_CHECK(callbacks == 4);
+
+    auto reusable = external(1U);
+    auto capture = std::make_shared<int>(5);
+    std::weak_ptr<int> weak_capture = capture;
+    auto suppressed = reusable.submit_typed<int>(
+        [capture](CancellationToken) { return Result<int>::success(*capture); },
+        [capture](Result<int>) {});
+    BSKY_RUNTIME_CHECK(suppressed);
+    capture.reset();
+    suppressed.value().close_callback();
+    BSKY_RUNTIME_CHECK(reusable.process_once());
+    BSKY_RUNTIME_CHECK(reusable.process_once());
+    BSKY_RUNTIME_CHECK(weak_capture.expired());
+    auto after_cleanup = reusable.submit_typed<int>(
+        [](CancellationToken) { return Result<int>::success(1); });
+    BSKY_RUNTIME_CHECK(after_cleanup);
+    BSKY_RUNTIME_CHECK(reusable.process_once());
+    BSKY_RUNTIME_CHECK(reusable.shutdown(1s));
+
+    auto rejected_runtime = external(1U);
+    Access::close_executor(rejected_runtime);
+    auto rejected = rejected_runtime.submit_typed<int>(
+        [](CancellationToken) { return Result<int>::success(1); },
+        [](Result<int>) { BSKY_RUNTIME_CHECK(false); });
+    BSKY_RUNTIME_CHECK(rejected);
+    BSKY_RUNTIME_CHECK(rejected.value().is_completed());
+    BSKY_RUNTIME_CHECK(rejected.value().error_category() == ErrorCategory::Shutdown);
+    BSKY_RUNTIME_CHECK(rejected.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(rejected_runtime.shutdown(1s));
+
+    BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+
+    Runtime managed;
+    BSKY_RUNTIME_CHECK(managed.start());
+    std::atomic<bool> managed_delivered{false};
+    auto managed_result = managed.submit_typed<int>(
+        [](CancellationToken) { return Result<int>::success(13); },
+        [&managed_delivered](Result<int> result) {
+            managed_delivered = result && result.value() == 13;
+        });
+    BSKY_RUNTIME_CHECK(managed_result);
+    BSKY_RUNTIME_CHECK(managed_result.value().wait_for_completion(1s));
+    BSKY_RUNTIME_CHECK(managed_result.value().await_callback_quiescence(1s));
+    BSKY_RUNTIME_CHECK(managed_delivered.load());
+    BSKY_RUNTIME_CHECK(managed.shutdown(1s));
+}
 } // namespace
 
 int main() {
@@ -437,4 +578,5 @@ int main() {
     self_shutdown_and_destruction(RuntimeMode::External);
     self_shutdown_and_destruction(RuntimeMode::Managed);
     notifier_and_move_assignment();
+    typed_operations();
 }

@@ -194,9 +194,10 @@ Required: managed/external composition with the pinned managed timed-awaiter
 correction, bounded operation admission, synchronous
 pre-admission rejection,
 exactly-one terminal outcome, cancellation/completion first-winner behavior,
-callback closure/suppression, move-only callbacks, post-admission executor
-rejection, shutdown/quiescence, lifetime leases, destruction safety, exception
-containment, and deterministic fake execution/race tests.
+callback closure/suppression, callback-first typed `Result<T>` delivery with
+move-only payloads, move-only callbacks, post-admission executor rejection,
+shutdown/quiescence, lifetime leases, destruction safety, exception containment,
+and deterministic fake execution/race tests.
 
 M1c must not require kurlyk, XRPC, WebSocket, OAuth, persistence, or Time
 Shield Lexicon integration. The foundation remains dependency-independent.

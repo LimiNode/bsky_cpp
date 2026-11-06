@@ -198,7 +198,39 @@ using OperationWork = MoveOnlyFunction<Result<void>(CancellationToken)>;
 /// One-shot terminal callback. The result is delivered at most once.
 using CompletionCallback = MoveOnlyFunction<void(Result<void>)>;
 
-/// Event-hub-cpp-backed operation runtime for non-blocking void work.
+/// Typed operation work. The runtime keeps the value in the selected
+/// callback channel; it is never copied into an operation handle.
+template <typename T>
+using TypedOperationWork = MoveOnlyFunction<Result<T>(CancellationToken)>;
+
+/// One-shot typed terminal callback. The callback receives the move-only
+/// `Result<T>` exactly once when a callback was supplied.
+template <typename T>
+using TypedCompletionCallback = MoveOnlyFunction<void(Result<T>)>;
+
+namespace detail {
+
+/// Bridges one typed operation through the existing void lifecycle.
+template <typename T>
+struct TypedOperationBridge {
+    /// Stores the typed work and callback until terminal delivery.
+    /// \param operation Typed work body.
+    /// \param completion Optional typed callback.
+    TypedOperationBridge(TypedOperationWork<T> operation,
+                         TypedCompletionCallback<T> completion)
+        : work(std::move(operation)), callback(std::move(completion)) {}
+
+    /// Owned typed work body.
+    TypedOperationWork<T> work;
+    /// Owned one-shot callback, if supplied.
+    TypedCompletionCallback<T> callback;
+    /// Terminal typed result retained until callback delivery.
+    std::shared_ptr<Result<T>> result;
+};
+
+}  // namespace detail
+
+/// Event-hub-cpp-backed operation runtime for non-blocking void and typed work.
 /// Work/callback execution uses one managed hub thread or the external caller.
 /// submit(), stop, shutdown, and handles support concurrent calls. External
 /// processing has one consumer; overlapping/reentrant passes return Conflict.
@@ -248,6 +280,67 @@ public:
     /// \return An operation handle or a synchronous admission error.
     Result<OperationHandle> submit(OperationWork work,
                                    CompletionCallback callback = {});
+
+    /// Admits one typed operation and queues it asynchronously.
+    ///
+    /// The typed payload is moved into the callback channel. It is not
+    /// available through `OperationHandle`, and no hidden copy is made.
+    ///
+    /// \tparam T Successful value type.
+    /// \param work Typed operation body.
+    /// \param callback Optional typed terminal callback.
+    /// \return An operation handle or a synchronous admission error.
+    template <typename T>
+    Result<OperationHandle> submit_typed(
+        TypedOperationWork<T> work,
+        TypedCompletionCallback<T> callback = {}) {
+        static_assert(!std::is_void<T>::value,
+                      "Use Runtime::submit for Result<void> operations.");
+        if (!work) {
+            return Result<OperationHandle>::failure(Error(
+                ErrorCategory::InvalidArgument,
+                "operation work is empty",
+                "runtime.submit_typed"));
+        }
+
+        auto bridge = std::make_shared<detail::TypedOperationBridge<T>>(
+            std::move(work), std::move(callback));
+
+        OperationWork erased_work = [bridge](CancellationToken token) mutable {
+            auto typed = bridge->work(token);
+            bridge->result = std::make_shared<Result<T>>(std::move(typed));
+            if (*bridge->result) {
+                return Result<void>::success();
+            }
+            return Result<void>::failure(Error(bridge->result->error()));
+        };
+
+        CompletionCallback erased_callback;
+        if (bridge->callback) {
+            erased_callback = [bridge](Result<void> terminal) mutable {
+                if (!terminal) {
+                    bridge->result.reset();
+                    bridge->callback(Result<T>::failure(
+                        Error(terminal.error())));
+                    return;
+                }
+
+                if (bridge->result) {
+                    auto typed = std::move(*bridge->result);
+                    bridge->result.reset();
+                    bridge->callback(std::move(typed));
+                    return;
+                }
+
+                bridge->callback(Result<T>::failure(Error(
+                    ErrorCategory::Internal,
+                    "typed result was not produced",
+                    "runtime.typed_operation")));
+            };
+        }
+
+        return submit(std::move(erased_work), std::move(erased_callback));
+    }
 
     /// Closes admission, suppresses queued callbacks, and records Shutdown for
     /// unfinished operations. Running work/callbacks may finish; does not wait.
