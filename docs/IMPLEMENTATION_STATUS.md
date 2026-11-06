@@ -33,9 +33,10 @@ A document, example, or roadmap item is not evidence of an implementation.
   [`tests/runtime.cpp`](../tests/runtime.cpp). Admission/stop serialization,
   first-winner outcomes, typed move-only payload delivery, callback capture
   quiescence, bounded capacity, self-destruction, and component-isolated
-  exports are covered. See the [runtime contract](contracts/OPERATION_RUNTIME.md)
-  for exact guarantees and remaining gates. Full M1c is not yet complete or
-  independently approved.
+  exports are covered. Typed delivery requires a nothrow-move-constructible
+  `Result<T>`; throwing payload moves are rejected at compile time. See the
+  [runtime contract](contracts/OPERATION_RUNTIME.md) for exact guarantees and
+  remaining gates. Full M1c is not yet complete or independently approved.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
   accepted documentation contract. Managed timed awaiter guarantees in the

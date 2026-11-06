@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,6 +42,31 @@ private:
     std::condition_variable m_condition;
     bool m_open = false;
 };
+
+struct ThrowingTypedPayload {
+    explicit ThrowingTypedPayload(int input) : value(input) {}
+    ThrowingTypedPayload(const ThrowingTypedPayload&) = delete;
+    ThrowingTypedPayload& operator=(const ThrowingTypedPayload&) = delete;
+    ThrowingTypedPayload(ThrowingTypedPayload&& other) {
+        if (throw_on_move) throw std::runtime_error("intentional typed move failure");
+        value = other.value;
+    }
+    ThrowingTypedPayload& operator=(ThrowingTypedPayload&& other) {
+        if (throw_on_move) throw std::runtime_error("intentional typed move failure");
+        value = other.value;
+        return *this;
+    }
+
+    static bool throw_on_move;
+    int value;
+};
+
+bool ThrowingTypedPayload::throw_on_move = false;
+
+static_assert(std::is_nothrow_move_constructible<Result<int>>::value,
+              "nothrow typed payloads must remain supported");
+static_assert(!std::is_nothrow_move_constructible<Result<ThrowingTypedPayload>>::value,
+              "throwing typed payloads must be rejected at compile time");
 
 OperationWork success() {
     return [](CancellationToken) { return Result<void>::success(); };
@@ -381,49 +407,64 @@ void concurrent_admission_cancel_stop() {
 }
 
 void racing_admission_cancel_stop() {
-    for (int round = 0; round != 1; ++round) {
-        auto runtime = external(64U);
-        Gate start, producer_ready, release_race;
+    // The private hook pauses a producer after it has crossed the admission
+    // boundary while the core mutex is held. Stop announces its intent and
+    // waits for that same boundary, making the race deterministic without
+    // changing production ordering or using timing sleeps.
+    {
+        auto runtime = external(2U);
+        Gate admitted_boundary, shutdown_requested, stop_returned;
         std::atomic<int> callbacks{0};
-        auto initial = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
-        BSKY_RUNTIME_CHECK(initial);
-        std::vector<OperationHandle> admitted;
+        Access::set_admission_hook(runtime, [&] {
+            admitted_boundary.signal();
+            shutdown_requested.wait();
+        });
+
+        std::unique_ptr<Result<OperationHandle>> admitted;
         std::thread producer([&] {
-            start.wait();
-            producer_ready.signal();
-            release_race.wait();
-            for (int n = 0; n != 32; ++n) {
-                auto result = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
-                if (result) admitted.push_back(result.value());
-                else BSKY_RUNTIME_CHECK(result.error().category() == ErrorCategory::Shutdown ||
-                                        result.error().category() == ErrorCategory::Backpressure);
-            }
+            admitted = std::make_unique<Result<OperationHandle>>(
+                runtime.submit(success(), [&](Result<void>) { ++callbacks; }));
         });
-        std::thread canceller([&] {
-            start.wait();
-            initial.value().request_cancellation();
-            initial.value().request_cancellation();
-        });
+        admitted_boundary.wait();
+
         std::thread stopper([&] {
-            start.wait();
-            producer_ready.wait();
-            release_race.signal();
+            shutdown_requested.signal();
+            runtime.request_stop();
+            stop_returned.signal();
             BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
         });
-        start.signal();
+        stop_returned.wait();
         producer.join();
-        canceller.join();
         stopper.join();
-        admitted.push_back(initial.value());
-        for (auto& handle : admitted) {
-            BSKY_RUNTIME_CHECK(handle.is_completed() &&
-                               handle.await_callback_quiescence(0ms));
-            BSKY_RUNTIME_CHECK(handle.error_category() == ErrorCategory::Shutdown ||
-                               handle.error_category() == ErrorCategory::Cancelled);
-        }
+        Access::set_admission_hook(runtime, {});
+
+        BSKY_RUNTIME_CHECK(admitted && *admitted);
+        BSKY_RUNTIME_CHECK(admitted->value().is_completed() &&
+                           admitted->value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(admitted->value().error_category() == ErrorCategory::Shutdown);
         BSKY_RUNTIME_CHECK(callbacks == 0);
         BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
-        BSKY_RUNTIME_CHECK(!runtime.submit(success()));
+        auto rejected = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+        BSKY_RUNTIME_CHECK(!rejected &&
+                           rejected.error().category() == ErrorCategory::Shutdown);
+    }
+
+    // The opposite ordering must reject synchronously and invoke no callback.
+    {
+        auto runtime = external(2U);
+        Gate stop_returned;
+        std::atomic<int> callbacks{0};
+        std::thread stopper([&] {
+            BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+            stop_returned.signal();
+        });
+        stop_returned.wait();
+        auto rejected = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+        stopper.join();
+        BSKY_RUNTIME_CHECK(!rejected &&
+                           rejected.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(callbacks == 0);
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
     }
 }
 

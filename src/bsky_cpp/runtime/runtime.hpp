@@ -277,8 +277,11 @@ public:
     /// Work and callback captures have independent ownership: closing the
     /// callback releases its captures even while queued work remains, while
     /// a running callback retains its captures until it returns.
+    /// `Result<T>` must be nothrow move constructible. This is a compile-time
+    /// boundary: a throwing payload move cannot be recovered after the shared
+    /// void lifecycle has committed terminal success.
     ///
-    /// \tparam T Successful value type.
+    /// \tparam T Successful value type whose `Result<T>` move is `noexcept`.
     /// \param work Typed operation body.
     /// \param callback Optional typed terminal callback.
     /// \return An operation handle or a synchronous admission error.
@@ -288,6 +291,9 @@ public:
         TypedCompletionCallback<T> callback = {}) {
         static_assert(!std::is_void<T>::value,
                       "Use Runtime::submit for Result<void> operations.");
+        static_assert(
+            std::is_nothrow_move_constructible<Result<T>>::value,
+            "Runtime::submit_typed requires a nothrow-move-constructible Result<T>");
         if (!work) {
             return Result<OperationHandle>::failure(Error(
                 ErrorCategory::InvalidArgument,

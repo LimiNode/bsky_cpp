@@ -175,6 +175,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             }
             // Registration and queue admission share the shutdown boundary.
             operations.emplace(state.get(), state);
+            if (submit_admission_hook) submit_admission_hook();
             try {
                 queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
                     if (auto live = weak.lock()) live->core->execute(live);
@@ -474,6 +475,8 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     bool exited = false;
     bool external_consumer_active = false;
     std::function<void()> external_pass_hook;
+    // Test-only gate invoked after registration while the admission mutex is held.
+    std::function<void()> submit_admission_hook;
     std::atomic<std::uint32_t> fault_mask{0U};
 
     bool consume_fault(RuntimeFaultPoint point) noexcept {
@@ -494,6 +497,12 @@ std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
 
 void RuntimeTestAccess::close_executor(Runtime& runtime) {
     runtime.m_core->module->tasks().close();
+}
+
+void RuntimeTestAccess::set_admission_hook(Runtime& runtime,
+                                            std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
+    runtime.m_core->submit_admission_hook = std::move(hook);
 }
 
 void RuntimeTestAccess::set_external_pass_hook(Runtime& runtime,

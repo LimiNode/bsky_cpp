@@ -29,7 +29,11 @@ shutdown, and callback-registration machinery as `submit()`. Its work returns
 `Result<T>` and its callback receives exactly one move-only `Result<T>` when a
 callback was supplied. A successful value is kept only until that callback is
 delivered and is moved into it; it is never copied into or exposed by the
-`OperationHandle`. If no callback is supplied, the value is intentionally
+`OperationHandle`. `Result<T>` must be nothrow move constructible; this is a
+compile-time boundary because a throwing payload move cannot be recovered
+after the shared void lifecycle has committed terminal success. Payloads that
+need fallible conversion must be normalized by the caller before returning
+`Result<T>`. If no callback is supplied, the value is intentionally
 discarded after terminal status is committed. Cancellation, shutdown,
 executor rejection, or a thrown typed work function produce a typed error in
 the callback, and a losing typed success payload is discarded. `T=void` is not
@@ -156,7 +160,9 @@ Draft's implicit runtime import; foundation API names and includes are unchanged
 manager as a controlled executor for cancellation/completion order, callback
 suppression, typed success/error delivery, move-only and throwing callables,
 both post-admission rejection paths, typed callback lifetime, terminalization
-faults, registry cleanup, and capacity. Gate-controlled threads test running
+faults, registry cleanup, and capacity. A private admission gate makes the
+producer/stop boundary deterministic without adding a production hook.
+Gate-controlled threads test running
 typed work/cancellation, running work/callback shutdown, concurrent
 admission/cancel/stop, overlapping external passes, self-waits, and runtime
 destruction on its own managed/external callback.
