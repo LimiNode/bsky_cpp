@@ -73,7 +73,10 @@ The runtime owns the injected executor's shared lease but does not stop or
 close it. Applications close or drain it according to its own contract. If it
 drops accepted tasks, the guard suppresses those registrations; if it leaves
 them queued, runtime shutdown may report `ShutdownTimedOut` until the executor
-drains or drops them.
+drains or drops them. In external mode, `shutdown()` performs the final
+`ModuleHub` handoff itself once the injected callback executor has made the
+registry empty; the callback executor is never used as a second runtime
+consumer.
 
 ## Consequences
 

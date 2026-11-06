@@ -105,7 +105,10 @@ The finalization handoff is serialized by the core mutex. A stop that arrives
 while an external pass owns the consumer lease leaves finalization to that pass;
 the pass rechecks the registry before handing the lease back. If no pass is
 active, stop takes the consumer lease itself. `hub.shutdown()` is never called
-concurrently with `hub.process_once()`.
+concurrently with `hub.process_once()`. When callbacks run on an injected
+executor, `shutdown()` performs this same final handoff after the callback
+executor has made the registry empty; the injected executor is never used as a
+second runtime consumer.
 
 Concurrent submit, cancellation, close, and shutdown are supported. Moving or
 destroying a particular public object must not race ordinary access to that

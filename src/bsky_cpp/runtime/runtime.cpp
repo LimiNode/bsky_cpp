@@ -313,6 +313,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     void deliver(const std::shared_ptr<OperationState>& state) {
         CompletionCallback callback;
         std::optional<Result<void>> result;
+        bool missing_payload = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (state->callback_closed || state->callback_done || state->callback_started) return;
@@ -326,16 +327,21 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 state->callback_started = false;
                 state->callback_done = true;
                 retire(state);
-                return;
+                missing_payload = true;
             }
+        }
+        if (missing_payload) {
+            return;
         }
         ExecutionScope scope(this);
         try { callback(std::move(*result)); } catch (...) {}
         callback.reset(); // Captures must be destroyed before reporting quiescence.
-        std::lock_guard<std::mutex> lock(mutex);
-        state->callback_started = false;
-        state->callback_done = true;
-        retire(state);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_started = false;
+            state->callback_done = true;
+            retire(state);
+        }
     }
 
     void close_callback(const std::shared_ptr<OperationState>& state) {
@@ -351,10 +357,12 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         ExecutionScope scope(this);
         callback.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->callback_cleanup = false;
-        state->callback_done = true;
-        retire(state);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_cleanup = false;
+            state->callback_done = true;
+            retire(state);
+        }
     }
 
     void abandon_work(const std::shared_ptr<OperationState>& state) {
@@ -452,11 +460,29 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         std::unique_lock<std::mutex> lock(mutex);
         if (executing_core == this) return pending(ErrorCategory::QuiescencePending,
                                                    "quiescence is pending on the current invocation");
-        if (!condition.wait_until(lock, deadline, [this] {
-                return operations.empty() && (!started || exited);
-            })) return pending(ErrorCategory::ShutdownTimedOut,
-                              "shutdown deadline expired; quiescence is pending");
-        return Result<void>::success();
+        for (;;) {
+            if (operations.empty() && (!started || exited)) return Result<void>::success();
+
+            const bool external_finalize =
+                options.mode == RuntimeMode::External && started && !exited &&
+                !external_consumer_active && operations.empty();
+            if (external_finalize) {
+                lock.unlock();
+                std::unique_lock<std::mutex> consumer(consumer_mutex);
+                finalize_external();
+                lock.lock();
+                continue;
+            }
+
+            if (!condition.wait_until(lock, deadline, [this] {
+                    return (operations.empty() && (!started || exited)) ||
+                           (options.mode == RuntimeMode::External &&
+                            operations.empty() && !external_consumer_active);
+                })) {
+                return pending(ErrorCategory::ShutdownTimedOut,
+                               "shutdown deadline expired; quiescence is pending");
+            }
+        }
     }
 
     static Result<void> pending(ErrorCategory category, const char* message) {
