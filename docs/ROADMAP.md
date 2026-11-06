@@ -94,8 +94,9 @@ invariant or contract from an earlier one.
   timed awaiters are covered for this runtime composition.
 - **Scope:** event-hub-cpp-backed managed and external execution composition,
   bounded operation admission, exactly-one terminal outcome, cancellation and
-  completion races, callback registration/quiescence, move-only callbacks,
-  executor rejection, shutdown, lifetime leases, exception containment, and
+  completion races, typed `Result<T>` callback delivery, callback
+  registration/quiescence, move-only callbacks and payloads, executor
+  rejection, shutdown, lifetime leases, exception containment, and
   deterministic fake executor/transport tests.
 - **Acceptance:** foundation still builds without optional dependencies;
   production runtime target has an explicit event-hub dependency; a
@@ -103,10 +104,10 @@ invariant or contract from an earlier one.
   adapters; no parallel TaskManager/EventBus/network worker is implemented;
   all ADR-0002 guarantees relevant to the implemented subset are covered by
   deterministic tests. The opt-in `bsky_cpp::runtime` target implements the
-  non-blocking void-operation subset documented in
-  [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md); typed result work,
-  public executor injection, a blocking-transport bridge, and operation
-  deadlines remain unimplemented. The broader acceptance gate is still open.
+  non-blocking void and callback-first typed-result subset documented in
+  [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md); public executor
+  injection, a blocking-transport bridge, operation deadlines, and future
+  adapters remain unimplemented. The broader acceptance gate is still open.
 - **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
   rate-limit partitions, header conversion, Lexicon datetime integration,
   WebSocket, replay, persistence, and OAuth.

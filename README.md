@@ -26,8 +26,11 @@ client and XRPC implementation remain deferred.
 The canonical documentation language is English. M0c examples remain
 conceptual; the implemented runtime is selected with `BSKY_BUILD_RUNTIME=ON`.
 
-The M1c Draft currently runs non-blocking `Result<void>` work. Its precise
-lifecycle, install-component usage, and remaining gates are documented in
+The M1c Draft currently runs non-blocking `Result<void>` work and supports
+callback-first typed `Result<T>` operations, including move-only payloads whose
+`Result<T>` move is `noexcept`. Its
+precise lifecycle, payload ownership, install-component usage, and remaining
+gates are documented in
 [OPERATION_RUNTIME.md](docs/contracts/OPERATION_RUNTIME.md).
 
 ## Includes

@@ -4,8 +4,9 @@ This describes the Draft implementation in
 [`runtime.hpp`](../../src/bsky_cpp/runtime/runtime.hpp), constrained by
 [ADR-0002](../adr/0002-async-execution-contract.md) and
 [ADR-0004](../adr/0004-runtime-composition.md). It implements non-blocking
-`Result<void>` work and one optional move-only terminal callback. It is a
-runtime primitive, not a high-level Client or a network implementation.
+`Result<void>` work, typed `Result<T>` work, and one optional move-only
+terminal callback per operation. It is a runtime primitive, not a high-level
+Client or a network implementation.
 
 ## Admission, cancellation, and delivery
 
@@ -22,6 +23,27 @@ that outcome. Cancellation does not preempt executing user work. A completed
 handle observes status and optional failure category, not another payload.
 Dropping a handle does not cancel an operation. Retained completed handles do
 not consume capacity or retain callback captures.
+
+`submit_typed<T>()` uses the same operation state, admission, cancellation,
+shutdown, and callback-registration machinery as `submit()`. Its work returns
+`Result<T>` and its callback receives exactly one move-only `Result<T>` when a
+callback was supplied. A successful value is kept only until that callback is
+delivered and is moved into it; it is never copied into or exposed by the
+`OperationHandle`. `Result<T>` must be nothrow move constructible; this is a
+compile-time boundary because a throwing payload move cannot be recovered
+after the shared void lifecycle has committed terminal success. Payloads that
+need fallible conversion must be normalized by the caller before returning
+`Result<T>`. If no callback is supplied, the value is intentionally
+discarded after terminal status is committed. Cancellation, shutdown,
+executor rejection, or a thrown typed work function produce a typed error in
+the callback, and a losing typed success payload is discarded. `T=void` is not
+accepted by `submit_typed`; `submit()` remains the void-operation API.
+
+Typed work and typed callback closures have independent ownership. Closing a
+queued registration destroys the typed callback and its captures immediately,
+even when work remains queued or is still running; work captures remain until
+that work returns. A callback that has started retains its captures until the
+callback returns, just like a void-operation callback.
 
 Delivery always posts through the upstream task manager. If posting fails
 after registration, the operation still returns an admitted handle, records
@@ -136,10 +158,14 @@ Draft's implicit runtime import; foundation API names and includes are unchanged
 
 [`tests/runtime.cpp`](../../tests/runtime.cpp) uses the real external task
 manager as a controlled executor for cancellation/completion order, callback
-suppression, move-only and throwing callables, both post-admission rejection
-paths, registry cleanup, and capacity. Gate-controlled threads test running
-work/callback shutdown, concurrent admission/cancel/stop, overlapping external
-passes, self-waits, and runtime destruction on its own managed/external callback.
+suppression, typed success/error delivery, move-only and throwing callables,
+both post-admission rejection paths, typed callback lifetime, terminalization
+faults, registry cleanup, and capacity. A private admission gate makes the
+producer/stop boundary deterministic without adding a production hook.
+Gate-controlled threads test running
+typed work/cancellation, running work/callback shutdown, concurrent
+admission/cancel/stop, overlapping external passes, self-waits, and runtime
+destruction on its own managed/external callback.
 Assertions fail the test process in Debug and Release. No sleep is used for
 test synchronization. Installed consumers and package-isolation checks run in
 CI together with runtime OFF/ON, Doxygen and Ubuntu ASan/UBSan.
@@ -150,10 +176,10 @@ after awaiter registration, including when a newly registered deadline is
 earlier than the current wait. Explicit `ModuleHub::request_stop()` continues
 to wake its loop.
 
-Still unimplemented: typed value-result operations, injected public executors,
-the blocking-transport bridge, operation deadlines, future adapters, high-level
-Client, XRPC, kurlyk, OAuth, WebSocket, and persistence. M1c remains partial and
-Draft pending independent source review; this contract does not claim that all
-items in the broader async conformance plan are delivered. TSan is run as a
+Still unimplemented: injected public executors, the blocking-transport bridge,
+operation deadlines, future adapters, high-level Client, XRPC, kurlyk, OAuth,
+WebSocket, and persistence. M1c remains partial and Draft pending independent
+source review; this contract does not claim that all items in the broader async
+conformance plan are delivered. TSan is run as a
 separate Linux job when supported by the toolchain; stress tests and ASan/UBSan
 do not substitute for it.

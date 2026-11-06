@@ -27,11 +27,14 @@ A document, example, or roadmap item is not evidence of an implementation.
 
 ## Partial
 
-- Draft M1c non-blocking void-operation runtime is implemented and tested in
+- Draft M1c non-blocking void and typed-result operation runtime is implemented
+  and tested in
   [`runtime.cpp`](../src/bsky_cpp/runtime/runtime.cpp) and
   [`tests/runtime.cpp`](../tests/runtime.cpp). Admission/stop serialization,
-  first-winner outcomes, callback capture quiescence, bounded capacity,
-  self-destruction, and component-isolated exports are covered. See the
+  first-winner outcomes, typed move-only payload delivery, callback capture
+  quiescence, bounded capacity, self-destruction, and component-isolated
+  exports are covered. Typed delivery requires a nothrow-move-constructible
+  `Result<T>`; throwing payload moves are rejected at compile time. See the
   [runtime contract](contracts/OPERATION_RUNTIME.md) for exact guarantees and
   remaining gates. Full M1c is not yet complete or independently approved.
 
@@ -48,8 +51,10 @@ A document, example, or roadmap item is not evidence of an implementation.
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
-- Typed result operations, the injected public executor, blocking-transport
-  bridge, operation deadlines, and optional future adapter remain contract-only.
+- The injected public executor, blocking-transport bridge, operation deadlines,
+  and optional future adapter remain contract-only. Typed result operations are
+  implemented only through the callback-first `submit_typed<T>()` subset; this
+  does not imply a future adapter or a payload-bearing handle.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
   events/streaming, delivery/lifetime, and persistence seams.
 - DID/handle resolution and endpoint discovery remain contract-only; M1a only

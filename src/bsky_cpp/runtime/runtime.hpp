@@ -198,7 +198,28 @@ using OperationWork = MoveOnlyFunction<Result<void>(CancellationToken)>;
 /// One-shot terminal callback. The result is delivered at most once.
 using CompletionCallback = MoveOnlyFunction<void(Result<void>)>;
 
-/// Event-hub-cpp-backed operation runtime for non-blocking void work.
+/// Typed operation work. The runtime keeps the value in the selected
+/// callback channel; it is never copied into an operation handle.
+template <typename T>
+using TypedOperationWork = MoveOnlyFunction<Result<T>(CancellationToken)>;
+
+/// One-shot typed terminal callback. The callback receives the move-only
+/// `Result<T>` exactly once when a callback was supplied.
+template <typename T>
+using TypedCompletionCallback = MoveOnlyFunction<void(Result<T>)>;
+
+namespace detail {
+
+/// Shared typed terminal payload slot. It owns no user work or callback.
+template <typename T>
+struct TypedResultSlot {
+    /// Terminal typed result retained until callback delivery.
+    std::shared_ptr<Result<T>> result;
+};
+
+}  // namespace detail
+
+/// Event-hub-cpp-backed operation runtime for non-blocking void and typed work.
 /// Work/callback execution uses one managed hub thread or the external caller.
 /// submit(), stop, shutdown, and handles support concurrent calls. External
 /// processing has one consumer; overlapping/reentrant passes return Conflict.
@@ -248,6 +269,77 @@ public:
     /// \return An operation handle or a synchronous admission error.
     Result<OperationHandle> submit(OperationWork work,
                                    CompletionCallback callback = {});
+
+    /// Admits one typed operation and queues it asynchronously.
+    ///
+    /// The typed payload is moved into the callback channel. It is not
+    /// available through `OperationHandle`, and no hidden copy is made.
+    /// Work and callback captures have independent ownership: closing the
+    /// callback releases its captures even while queued work remains, while
+    /// a running callback retains its captures until it returns.
+    /// `Result<T>` must be nothrow move constructible. This is a compile-time
+    /// boundary: a throwing payload move cannot be recovered after the shared
+    /// void lifecycle has committed terminal success.
+    ///
+    /// \tparam T Successful value type whose `Result<T>` move is `noexcept`.
+    /// \param work Typed operation body.
+    /// \param callback Optional typed terminal callback.
+    /// \return An operation handle or a synchronous admission error.
+    template <typename T>
+    Result<OperationHandle> submit_typed(
+        TypedOperationWork<T> work,
+        TypedCompletionCallback<T> callback = {}) {
+        static_assert(!std::is_void<T>::value,
+                      "Use Runtime::submit for Result<void> operations.");
+        static_assert(
+            std::is_nothrow_move_constructible<Result<T>>::value,
+            "Runtime::submit_typed requires a nothrow-move-constructible Result<T>");
+        if (!work) {
+            return Result<OperationHandle>::failure(Error(
+                ErrorCategory::InvalidArgument,
+                "operation work is empty",
+                "runtime.submit_typed"));
+        }
+
+        auto slot = std::make_shared<detail::TypedResultSlot<T>>();
+
+        OperationWork erased_work = [work = std::move(work), slot](
+                                        CancellationToken token) mutable {
+            auto typed = work(token);
+            slot->result = std::make_shared<Result<T>>(std::move(typed));
+            if (*slot->result) {
+                return Result<void>::success();
+            }
+            return Result<void>::failure(Error(slot->result->error()));
+        };
+
+        CompletionCallback erased_callback;
+        if (callback) {
+            erased_callback = [callback = std::move(callback), slot](
+                                  Result<void> terminal) mutable {
+                if (!terminal) {
+                    slot->result.reset();
+                    callback(Result<T>::failure(
+                        Error(terminal.error())));
+                    return;
+                }
+
+                if (slot->result) {
+                    auto typed = std::move(*slot->result);
+                    slot->result.reset();
+                    callback(std::move(typed));
+                    return;
+                }
+
+                callback(Result<T>::failure(Error(
+                    ErrorCategory::Internal,
+                    "typed result was not produced",
+                    "runtime.typed_operation")));
+            };
+        }
+
+        return submit(std::move(erased_work), std::move(erased_callback));
+    }
 
     /// Closes admission, suppresses queued callbacks, and records Shutdown for
     /// unfinished operations. Running work/callbacks may finish; does not wait.
