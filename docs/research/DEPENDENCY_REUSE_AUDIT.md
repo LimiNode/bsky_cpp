@@ -10,7 +10,7 @@ rechecked when a dependency is updated.
 
 | Repository | Exact audited commit | Proposed owner | Current decision |
 | --- | --- | --- | --- |
-| `event-hub-cpp` | `2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0` | upstream project, with a bsky adapter | required runtime infrastructure for the opt-in M1c operation runtime |
+| `event-hub-cpp` | `e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3` | upstream project, with a bsky adapter | required runtime infrastructure for the opt-in M1c operation runtime; PR #13 merged |
 | `kurlyk` | `b62cd53f672c47b74bb14d762ea9dc59a9df19ce` | upstream project, with a bsky transport adapter | reuse native async path; keep the public seam transport-neutral; defer OAuth profile work |
 | `time-shield-cpp` | `d5f1203f24341e4146af35d5bb36e762056d181f` | upstream project, with a bsky time adapter | reuse clock/calendar primitives after conformance gate; propose upstream parser fix |
 
@@ -24,14 +24,14 @@ integration is now implemented in `src/bsky_cpp/runtime/`.
 
 | Capability | Existing API and source evidence | Decision | Missing guarantee / test | Owner / milestone |
 | --- | --- | --- | --- | --- |
-| Hub lifecycle | `ModuleHub::run()` and `start()` initialize modules, run a blocking or background loop, shut down, and rethrow background exceptions (`event-hub-cpp/include/event_hub/module_hub.hpp:279-325`, SHA above). `ModuleExecutionMode` provides `inline_in_hub`, `private_thread`, and `manual` (`module.hpp:26-31`). | Reuse directly through the M1c runtime adapter; managed mode carries the documented awaiter limitation. | Need a deterministic test for client destruction, shutdown deadline, and callback quiescence across all module modes. | upstream + bsky adapter, M1c |
+| Hub lifecycle | `ModuleHub::run()` and `start()` initialize modules, run a blocking or background loop, shut down, and rethrow background exceptions (`event-hub-cpp/include/event_hub/module_hub.hpp:279-325`, SHA above). `ModuleExecutionMode` provides `inline_in_hub`, `private_thread`, and `manual` (`module.hpp:26-31`). | Reuse directly through the M1c runtime adapter; the pinned snapshot includes the reviewed managed awaiter deadline fix. | Need a deterministic test for client destruction, shutdown deadline, and callback quiescence across all module modes. | upstream + bsky adapter, M1c |
 | External/manual execution | `ModuleHub::process_once()` delegates to `process()` (`module_hub.hpp:201-204`); `set_notifier()` wires a non-owning notifier (`module_hub.hpp:264-270`). `RunLoop::process_once()` and `run_until()` aggregate buses and task managers and wait on notifier/deadlines (`run_loop.hpp:129-186`). | Thin adapter in external mode; caller drives `process_once()` and uses a notifier plus deadline hint. | Adapter must not retain a borrowed notifier past its documented lifetime; use controlled fake execution for operation state and bounded real-clock scheduler tests because upstream has no clock injection. | bsky adapter, M1c |
 | Tasks, delay, periodic work | `TaskManager` supports ready/delayed/periodic tasks, `post_every_after`, `cancel`, `next_deadline`, and `TaskContext` cancellation/reschedule (`task_manager.hpp:199-275`, `535-607`, `737-771`, `988-1077`). Periodic scheduling is fixed-delay or fixed-rate (`task.hpp:95-117`). | Reuse directly; do not implement a second task manager. | `TaskManager` is single-consumer for `process()` and has no queue capacity. Test admission/backpressure at the bsky boundary, not by assuming an upstream bound. | upstream + bsky policy, M1c |
 | Priorities and fairness | Three FIFO ready queues are selected high, normal, low (`task.hpp:95-105`; `task_manager.hpp:1120-1129`). | Reuse priority levels as an implementation detail only. | No starvation/fairness guarantee is documented. Add a bounded mixed-priority deterministic test before promising fairness. | bsky conformance, M1c |
 | Task exceptions | `TaskManager::set_exception_handler()` either reports and continues or, without a handler, restores unstarted work and rethrows (`task_manager.hpp:86-92`, `610-673`). | Thin adapter maps an exception to one terminal operation outcome. | Verify callback exceptions cannot create a second terminal `Result`; test handler failure policy. | bsky adapter, M1c |
 | Event delivery | `EventBus` offers direct and queued delivery policies; callbacks run on the thread calling `emit_direct()` or `process()` (`event_bus.hpp:73-88`, `457-531`). `EventEndpoint` owns subscriptions/awaiters and closes them on destruction (`event_endpoint.hpp:35-84`). | Reuse directly for internal runtime signals; do not expose EventBus types in high-level DTOs. | Queued events are held in an unbounded `std::queue` (`event_bus.hpp:525-565`, `839-840`). A bsky operation queue must impose explicit bounds and typed backpressure. | bsky adapter, M1c |
 | Awaiters and cancellation | `EventAwaiter` polls cancellation and timeout cooperatively and exposes `next_deadline()` (`event_awaiter.hpp:25-30`, `140-209`). `EventBus::next_awaiter_deadline()` aggregates active awaiters (`event_bus.hpp:570-593`). | Reuse awaiters for internal coordination only. | Define which cancellation source owns an operation and prove callback quiescence; add close-before-start and timeout race tests. | bsky conformance, M1c |
-| Run-loop deadline handling | `RunLoop::next_task_wait()` includes queued EventBus awaiter deadlines and task deadlines (`run_loop.hpp:224-258`). | Prefer `RunLoop` or equivalent explicit aggregation in external mode. | `ModuleHub::next_deadline()` only visits module task managers and module hints (`module_hub.hpp:243-261`); it does **not** include `m_bus.next_awaiter_deadline()`. In addition, `EventBus::register_awaiter()` (`event_bus.hpp:612-623`) does not notify the loop, so a newly registered earlier deadline can be missed after the loop starts waiting. | upstream issue proposal; bsky regression, M1c |
+| Run-loop deadline handling | `RunLoop::next_task_wait()` includes queued EventBus awaiter deadlines and task deadlines (`run_loop.hpp:224-258`). The merged `ModuleHub::next_deadline()` now also includes `m_bus.next_awaiter_deadline()`, and awaiter registration notifies after releasing the awaiter mutex (`module_hub.hpp`, `event_bus.hpp`, SHA above). | Reuse directly; external mode still owns its notifier-driven loop and deadline policy. | Keep the managed pre-start, post-wait, earlier-deadline, and external-loop regression fixtures when updating the dependency. | upstream + bsky regression, M1c |
 | Calendar scheduling / Time Shield | `CalendarScheduler` delegates to an existing `TaskManager`, owns no thread, and documents task-manager lifetime (`calendar_scheduler.hpp:30-73`). Tests cover DST, overlap, and exception behavior (`tests/test_calendar_scheduler.cpp:475-518`). | Reuse only for calendar semantics; use the hub scheduler as the execution owner. | Verify timezone fixture set used by AT Protocol jobs; no second scheduler. | upstream + bsky adapter, later milestone |
 | Shutdown and worker lifetime | `Module::shutdown()` stops/join workers, closes tasks and endpoint; it explicitly does not wait for EventBus callbacks already started (`module.hpp:130-180`). `ModuleHub::shutdown()` coordinates modules. | Treat module shutdown and operation callback quiescence as separate phases. | A bsky shutdown deadline must report `QuiescencePending`/`ShutdownTimedOut`, not silently claim quiescence. | bsky operation state, M1c |
 | Backpressure | TaskManager and EventBus expose counts but no bounded queue admission. | Implement bsky operation admission bounds above upstream. | Deterministic queue-limit test; never infer bounded allocation from `process()` quotas. | bsky, M1c |
@@ -39,26 +39,21 @@ integration is now implemented in `src/bsky_cpp/runtime/`.
 #### Managed and external modes
 
 Managed mode means the production runtime owns a `ModuleHub` lifetime lease and
-calls `start()`/`run()` according to the selected thread policy. Ordinary task
-execution may proceed with a documented limitation, but managed timed awaiter
-delivery and timeout-driven cleanup are not guaranteed until the complete
-upstream deadline-and-wake-up correction lands. Explicit
-`ModuleHub::request_stop()` already wakes local/external notifiers.
+calls `start()`/`run()` according to the selected thread policy. The pinned
+upstream snapshot includes the deadline-and-wake-up correction, so managed
+timed awaiter delivery and timeout-driven cleanup are covered. Explicit
+`ModuleHub::request_stop()` continues to wake local/external notifiers.
 External mode means the application owns the loop: the adapter installs a
 notifier, calls `process_once()`, and computes a wait from all task,
 event-awaiter, and transport deadlines. The adapter must not build a parallel
 `TaskManager` or client loop: that would duplicate cancellation, wake-up,
 priority, exception, and shutdown semantics already implemented upstream.
 
-The `ModuleHub::next_deadline()` omission affects both `run()` and `start()` and
-is an upstream compatibility risk, not a local patch target. A second race is
-that `EventBus::register_awaiter()` inserts under `m_awaiters_mutex` without
-notifying the loop; a sleeping loop therefore needs a notifier wake-up when new
-work appears or a newly registered deadline becomes earlier. External mode must
-aggregate `EventBus::next_awaiter_deadline()` explicitly. Managed mode must
-require the complete upstream correction before promising timeout delivery,
-or timeout-driven lifetime cleanup. The minimum deterministic
-regression coverage is:
+The merged upstream correction covers both `run()` and `start()`, and
+`EventBus::register_awaiter()` notifies after releasing `m_awaiters_mutex`; a
+sleeping loop is therefore woken when new work or an earlier deadline appears.
+External mode still aggregates `EventBus::next_awaiter_deadline()` through its
+normal hub deadline contract. The minimum deterministic regression coverage is:
 
 1. create a hub with an inline module and a queued event-bus awaiter with a
    short timeout before the loop starts;
@@ -72,10 +67,10 @@ regression coverage is:
    event and assert expiry at the deadline;
 5. repeat through managed `run()` and `start()`, with bounded shutdown/join.
 
-Until upstream clarifies or fixes this, no managed awaiter-timeout guarantee is
-made. No `event-hub-cpp` change is included in this repository.
+These cases are covered by upstream PR #13 at the pinned merge commit. No
+EventBus or ModuleHub implementation is copied into this repository.
 
-#### Upstream corrective proposal (not implemented here)
+#### Upstream corrective proposal (implemented in PR #13)
 
 In `event-hub-cpp`, aggregate queued/compatible
 `EventBus::next_awaiter_deadline()` values in `ModuleHub::next_deadline()` and
@@ -86,8 +81,8 @@ preserve lock ordering. Cover an awaiter registered before loop start and one
 registered after the loop has entered its wait state. Add deterministic tests
 for `ModuleHub::start()`, blocking `run()`, and an external notifier-driven
 `process_once()` loop, all with handshakes/barriers, bounded shutdown/join, and
-assertions against lost wake-ups. This proposal is owned by the upstream
-repository and is a prerequisite for a managed timed-awaiter guarantee.
+assertions against lost wake-ups. This upstream implementation is consumed at
+merge commit `e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3`.
 
 ### kurlyk
 
@@ -143,14 +138,14 @@ claim:
 
 | Classification | Evidence |
 | --- | --- |
-| Verified from source | [event-hub ModuleHub deadlines](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/module_hub.hpp#L243-L261), [event-hub managed run loop](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/module_hub.hpp#L427-L455), [event-hub external run-loop deadlines](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/run_loop.hpp#L224-L258), [event-hub task manager](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/include/event_hub/task_manager.hpp#L610-L771) |
+| Verified from source | [event-hub ModuleHub deadlines](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/include/event_hub/module_hub.hpp#L243-L261), [event-hub managed run loop](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/include/event_hub/module_hub.hpp#L427-L455), [event-hub external run-loop deadlines](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/include/event_hub/run_loop.hpp#L224-L258), [event-hub task manager](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/include/event_hub/task_manager.hpp#L610-L771) |
 | Verified from source | [kurlyk retry/status handler](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/http/HttpRequestManager/HttpRequestHandler.hpp#L75-L116), [kurlyk streaming callback](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/http/HttpRequestManager/HttpRequestHandler.hpp#L207-L232), [kurlyk WebSocket options](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/websocket/WebSocketClient.hpp#L361-L410), [kurlyk global worker](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/include/kurlyk/core/NetworkWorker.hpp#L21-L30) |
 | Source-backed test expectations | [kurlyk retry/streaming fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/http_retry_streaming_main.cpp#L107-L140), [kurlyk backpressure fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/backpressure_main.cpp#L45-L78), [kurlyk destructor cancellation fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/http_client_destructor_main.cpp#L68-L103), [kurlyk WebSocket queue fixture](https://github.com/LimiNode/kurlyk/blob/b62cd53f672c47b74bb14d762ea9dc59a9df19ce/tests/integration/websocket_local_main.cpp#L64-L110) |
 | Verified from source | [Time Shield fractional parser](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/include/time_shield/text/time_parser.hpp#L556-L584), [Time Shield DateTime](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/include/time_shield/datetime/DateTime.hpp#L659-L698), [Time Shield parser fixture](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/tests/parse_iso8601_test.cpp#L76-L92), [Time Shield CMake](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/CMakeLists.txt#L12-L55) |
 | Verified by executed test | Repository link checker, link-checker regression test, and exact-head GitHub CI for this PR. These verify bsky documentation/build health only; they do not execute the detached upstream audit trees. |
 | Architectural inference | Ownership split, target topology, runtime leases, and milestone gates in this document and ADR-0004. |
 | Proposed implementation | Future runtime/adapter targets, CMake package integration, and conformance tests. |
-| Unresolved | Managed awaiter timeout before the upstream fix, injectable upstream clock, global wire-header order, and WebSocket replay semantics. |
+| Unresolved | Injectable upstream clock, global wire-header order, and WebSocket replay semantics. |
 
 ## Concrete dependency integration plan
 
@@ -161,7 +156,7 @@ package:
 
 1. `bsky_cpp::runtime` finds `event-hub-cpp CONFIG REQUIRED` and links
    `event-hub-cpp::event-hub-cpp`; its installed config calls
-   `find_dependency(event-hub-cpp CONFIG)` ([upstream target/export](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/CMakeLists.txt#L31-L43), [package config](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/cmake/event-hub-cppConfig.cmake.in#L1-L17)).
+   `find_dependency(event-hub-cpp CONFIG)` ([upstream target/export](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/CMakeLists.txt#L31-L43), [package config](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/cmake/event-hub-cppConfig.cmake.in#L1-L17)).
 2. A transport-neutral Client target depends on `bsky_cpp::runtime` and the
    abstract async transport seam only. It must remain installable when a
    non-kurlyk adapter is selected.
@@ -174,7 +169,7 @@ package:
    defaults NTP **ON** at the audited SHA ([target/options](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/CMakeLists.txt#L12-L30), [install/export](https://github.com/LimiNode/time-shield-cpp/blob/d5f1203f24341e4146af35d5bb36e762056d181f/CMakeLists.txt#L37-L72)); bsky must set NTP `OFF` unless a reviewed feature explicitly needs it.
 5. Do not nest both a top-level Time Shield `add_subdirectory()` and the
    event-hub copy. Event-hub currently adds its configured Time Shield path and
-   uses `FORCE` for NTP/examples/tests ([upstream options](https://github.com/LimiNode/event-hub-cpp/blob/2d4b09763603db2e5f9c5ca5bce7de3ffc9332b0/CMakeLists.txt#L45-L78)).
+   uses `FORCE` for NTP/examples/tests ([upstream options](https://github.com/LimiNode/event-hub-cpp/blob/e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3/CMakeLists.txt#L45-L78)).
    The integration must choose one package/source path and isolate these cache
    options in a preset.
 6. Keep submodules flat and pinned under `external/<dependency>/`, initialized
@@ -217,8 +212,8 @@ it does not require unsupported virtual time.
 
 ### M1c — Operation Runtime
 
-1. managed/external composition and notifier wake-up; managed timed awaiters are
-   gated on the upstream deadline correction;
+1. managed/external composition and notifier wake-up, including the pinned
+   managed timed-awaiter correction;
 2. bounded operation admission and synchronous rejection before admission;
 3. exactly-one terminal outcome and cancellation/completion first-winner;
 4. callback closure/suppression, move-only callbacks, executor rejection, and

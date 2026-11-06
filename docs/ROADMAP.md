@@ -87,12 +87,11 @@ invariant or contract from an earlier one.
 - **Deferred:** async operation admission/execution (M1c), XRPC encoding and
   protocol mapping (M1d), identity resolution, and network adapters.
 
-### M1c — Operation runtime (partial Draft, pending source review)
+### M1c — Operation runtime (partial Draft)
 
-- **Prerequisites:** M1b, ADR-0002, and ADR-0004. Managed task execution may
-  proceed with the explicitly documented event-hub awaiter limitation; the
-  upstream deadline-and-wake-up correction is required before claiming
-  guaranteed managed timed awaiters.
+- **Prerequisites:** M1b, ADR-0002, and ADR-0004. The pinned event-hub
+  snapshot includes the reviewed deadline-and-wake-up correction, so managed
+  timed awaiters are covered for this runtime composition.
 - **Scope:** event-hub-cpp-backed managed and external execution composition,
   bounded operation admission, exactly-one terminal outcome, cancellation and
   completion races, callback registration/quiescence, move-only callbacks,
@@ -102,9 +101,8 @@ invariant or contract from an earlier one.
   production runtime target has an explicit event-hub dependency; a
   transport-neutral high-level Client is separate from concrete network
   adapters; no parallel TaskManager/EventBus/network worker is implemented;
-  all ADR-0002 guarantees that do not depend on the upstream awaiter fix are
-  covered by deterministic tests, with the managed limitation recorded in the
-  conformance report. The opt-in `bsky_cpp::runtime` target implements the
+  all ADR-0002 guarantees relevant to the implemented subset are covered by
+  deterministic tests. The opt-in `bsky_cpp::runtime` target implements the
   non-blocking void-operation subset documented in
   [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md); typed result work,
   public executor injection, a blocking-transport bridge, and operation

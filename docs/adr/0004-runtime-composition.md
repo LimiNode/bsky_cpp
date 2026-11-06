@@ -18,8 +18,8 @@ components.
 
 The foundation remains dependency-independent. The M1c runtime target and its
 event-hub composition are implementation evidence for the operation-runtime
-portion of this decision; managed awaiter timeout guarantees remain gated by
-the upstream correction described below.
+portion of this decision. The pinned event-hub snapshot now includes the
+reviewed awaiter deadline and wake-up correction.
 
 The Draft's exact subset, source domain, package component selection, stop
 policy, lifetime ownership, and compatibility implications are specified in
@@ -75,29 +75,20 @@ The production runtime supports two modes over the same event-hub primitives:
 
 - **Managed:** the runtime owns an event-hub `ModuleHub` lifetime lease and
   starts/stops it according to an explicit policy. Upstream modules own their
-  task managers and private workers. Managed task execution may be used with a
-  documented limitation: timed awaiter delivery and timeout-driven cleanup are
-  not guaranteed until the complete upstream correction below lands. Explicit
-  `ModuleHub::request_stop()` already notifies the loop correctly.
+  task managers and private workers. The pinned upstream snapshot aggregates
+  queued awaiter deadlines and wakes the loop after awaiter registration, so
+  managed timed awaiter delivery and timeout-driven cleanup are covered.
 - **External:** the caller owns the loop. The runtime installs a non-owning
   notifier, calls `process_once()`, and explicitly aggregates module task,
   EventBus awaiter, and transport deadlines. It must not create a parallel
   TaskManager, EventBus, or client run loop.
 
-The pinned `ModuleHub::next_deadline()` does not aggregate
-`EventBus::next_awaiter_deadline()`, and `EventBus::register_awaiter()` does not
-notify the loop after inserting an awaiter. `ModuleHub::run_loop()` can
-therefore wait forever when the only pending work is an awaiter timeout, or
-remain asleep when another thread registers a newly earlier timeout after the
-loop has started waiting. The current public API does not expose a configurable
-managed polling cap. Consequently:
-
-- external mode must aggregate the bus awaiter deadline itself;
-- managed mode may execute ordinary tasks with this limitation, but must require
-  the complete upstream event-hub correction before promising awaiter timeout
-  delivery or timeout-driven lifetime cleanup; and
-- this ADR does not claim that `ModuleHub::start()` or `run()` supports a local
-  polling-cap workaround.
+The pinned `ModuleHub::next_deadline()` aggregates queued
+`EventBus::next_awaiter_deadline()` values, and `EventBus::register_awaiter()`
+notifies after releasing `m_awaiters_mutex`. The upstream tests cover managed
+`run()`/`start()` and an external notifier-driven loop, including a newly
+earlier deadline. External mode still owns its loop and must use the notifier
+and deadline contract; it does not create a parallel scheduler.
 
 ### Ownership, cancellation, shutdown, and callbacks
 
@@ -164,9 +155,10 @@ or unbounded polling.
 
 ## Upstream corrective proposals
 
-### event-hub-cpp: awaiter deadline aggregation and wake-up
+### event-hub-cpp: awaiter deadline aggregation and wake-up (resolved)
 
-At the pinned SHA, the upstream correction must:
+The correction was accepted in upstream PR #13 and is pinned at merge commit
+`e3580057a0273e7004cd4fd91ad9ae7d74d4c5b3`. It:
 
 1. aggregate queued/compatible `EventBus::next_awaiter_deadline()` values in
    `ModuleHub::next_deadline()`;
@@ -182,8 +174,8 @@ At the pinned SHA, the upstream correction must:
 6. assert bounded shutdown/join and no lost wake-ups in every scenario.
 
 Tests should use handshakes/barriers and bounded deadlines rather than tight
-sleeps or iteration-count polling. This proposal belongs in the upstream
-repository; PR #9 does not modify it.
+sleeps or iteration-count polling. The bsky integration consumes this upstream
+implementation without copying its EventBus or ModuleHub code.
 
 ### time-shield-cpp: fractional-second contract
 
@@ -198,9 +190,8 @@ through a lossy millisecond formatter.
 
 ### M1c — Operation Runtime
 
-Required: managed/external composition (managed task execution may ship with
-the documented awaiter limitation; guaranteed managed timed awaiters require
-the upstream correction), bounded operation admission, synchronous
+Required: managed/external composition with the pinned managed timed-awaiter
+correction, bounded operation admission, synchronous
 pre-admission rejection,
 exactly-one terminal outcome, cancellation/completion first-winner behavior,
 callback closure/suppression, move-only callbacks, post-admission executor
@@ -229,9 +220,9 @@ network-specific reconciliation.
 This composition reuses tested upstream scheduling and HTTP primitives without
 making them mandatory for foundation consumers. It gives the production Client
 one runtime owner, prevents duplicate workers/schedulers, and makes package
-installation consequences explicit. It also means managed awaiter timeouts are
-blocked on an upstream correction, while deterministic M1c operation semantics
-can proceed with fake execution and bounded real-clock integration tests.
+installation consequences explicit. Managed awaiter deadlines are now covered
+by the pinned upstream correction, while typed M1c operation semantics continue
+with fake execution and bounded real-clock integration tests.
 
 The existing M1b synchronous `Transport::send()` seam remains valid and is not
 replaced by this ADR. It is a low-level fake-friendly seam, not the application
@@ -239,7 +230,8 @@ async implementation.
 
 ## Open questions
 
-- Which event-hub upstream release will include the deadline aggregation fix?
+- Which event-hub release policy should replace the pinned merge commit when a
+  compatible tagged release is available?
 - What queue bounds and fairness policy are appropriate for one-shot operations
   versus streams?
 - Which ordered-header representation should kurlyk expose upstream, or should
