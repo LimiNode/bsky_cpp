@@ -34,9 +34,11 @@ compile-time boundary because a throwing payload move cannot be recovered
 after the shared void lifecycle has committed terminal success. Payloads that
 need fallible conversion must be normalized by the caller before returning
 `Result<T>`. If no callback is supplied, the value is intentionally
-discarded after terminal status is committed. Cancellation, shutdown,
-executor rejection, or a thrown typed work function produce a typed error in
-the callback, and a losing typed success payload is discarded. `T=void` is not
+discarded after terminal status is committed. Cancellation, shutdown, work
+queue rejection, or a thrown typed work function produce a typed error in the
+callback. Rejection by the callback executor happens after terminal
+commitment: the callback is suppressed and the already selected outcome is
+preserved. A losing typed success payload is discarded. `T=void` is not
 accepted by `submit_typed`; `submit()` remains the void-operation API.
 
 Typed work and typed callback closures have independent ownership. Closing a
@@ -45,13 +47,18 @@ even when work remains queued or is still running; work captures remain until
 that work returns. A callback that has started retains its captures until the
 callback returns, just like a void-operation callback.
 
-Delivery always posts through the upstream task manager. If posting fails
-after registration, the operation still returns an admitted handle, records
-one terminal `Shutdown` dispatch failure, and closes the callback registration.
-There is no inline callback fallback. The callback slot is reserved before the
-terminal result is committed; failure to reserve it can therefore be reported
-without rewriting a previously committed result. Work exceptions become
-`Internal`; callback exceptions are contained after the terminal result is set.
+Delivery posts through `RuntimeOptions::executor` when supplied. If it is
+empty, a private adapter posts through the existing `ModuleHub` task manager;
+no second scheduler is created. If callback posting fails after registration,
+the operation still returns an admitted handle, closes the callback
+registration, and preserves the terminal outcome already committed. Rejection
+of the admitted work task remains a terminal `Shutdown` outcome. An executor
+that accepts and later drops a task is observed through the dispatch guard and
+has the same suppression result. There is no inline callback fallback. The
+callback slot is reserved before the terminal result is committed, and the
+external `post()` call happens after releasing the core mutex. Work exceptions
+become `Internal`; callback exceptions are contained after the terminal result
+is set.
 Terminalization is an exception boundary: allocation or dispatch failure after
 admission enters an emergency terminal path, suppresses delivery when needed,
 and still releases callback/work captures before registry retirement. The stop
@@ -76,13 +83,23 @@ permanent self-owned cycle.
 
 External mode has one consumer calling `process_once()` and `next_deadline()`.
 Overlapping or reentrant processing fails with `Conflict`; it never enters the
-upstream single-consumer task manager concurrently. Work and callbacks run on
-that consumer. `next_deadline()` includes task and queued awaiter deadlines,
+upstream single-consumer task manager concurrently. Work runs on that
+consumer; callbacks run on the selected executor. `next_deadline()` includes
+task and queued awaiter deadlines,
 and returns now when immediate work exists. An optional shared notifier lease
 in `RuntimeOptions` remains alive with the core. `notify()` must be short,
 non-blocking, and must not reenter the runtime. Read the notifier generation
 before processing and use its generation-aware wait after processing to avoid
 lost wakeups. No borrowed notifier overload is provided.
+
+`RuntimeOptions::executor` is a shared lifetime lease for callback dispatch.
+It accepts move-only tasks through `IExecutor::post()`, reports pre-admission
+rejection with `false`, and must enqueue asynchronously. An accepted task must
+run once or be destroyed; destruction is observable and suppresses the
+registration. The runtime never owns or stops an injected executor. If its
+queue remains open but does not drain, shutdown may time out; closing or
+draining that queue is the application's responsibility. The default adapter
+keeps the previous event-hub callback behavior.
 
 The finalization handoff is serialized by the core mutex. A stop that arrives
 while an external pass owns the consumer lease leaves finalization to that pass;
@@ -157,11 +174,14 @@ Draft's implicit runtime import; foundation API names and includes are unchanged
 ## Evidence and remaining gates
 
 [`tests/runtime.cpp`](../../tests/runtime.cpp) uses the real external task
-manager as a controlled executor for cancellation/completion order, callback
-suppression, typed success/error delivery, move-only and throwing callables,
-both post-admission rejection paths, typed callback lifetime, terminalization
-faults, registry cleanup, and capacity. A private admission gate makes the
-producer/stop boundary deterministic without adding a production hook.
+manager and a deterministic move-only fake executor for
+cancellation/completion order, callback suppression, typed success/error
+delivery, move-only and throwing callables, callback-executor rejection and
+close-after-acceptance, typed callback lifetime, terminalization faults,
+registry cleanup, and capacity. The fake covers accepted, rejected, queued,
+running, closed, drained, and suppressed states. A private admission gate
+makes the producer/stop boundary deterministic without adding a production
+hook.
 Gate-controlled threads test running
 typed work/cancellation, running work/callback shutdown, concurrent
 admission/cancel/stop, overlapping external passes, self-waits, and runtime
@@ -176,10 +196,10 @@ after awaiter registration, including when a newly registered deadline is
 earlier than the current wait. Explicit `ModuleHub::request_stop()` continues
 to wake its loop.
 
-Still unimplemented: injected public executors, the blocking-transport bridge,
-operation deadlines, future adapters, high-level Client, XRPC, kurlyk, OAuth,
-WebSocket, and persistence. M1c remains partial and Draft pending independent
-source review; this contract does not claim that all items in the broader async
-conformance plan are delivered. TSan is run as a
+Still unimplemented: the blocking-transport bridge, operation deadlines,
+future adapters, high-level Client, XRPC, kurlyk, OAuth, WebSocket, and
+persistence. M1c remains partial and Draft pending independent source review;
+this contract does not claim that all items in the broader async conformance
+plan are delivered. TSan is run as a
 separate Linux job when supported by the toolchain; stress tests and ASan/UBSan
 do not substitute for it.

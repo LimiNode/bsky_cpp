@@ -83,6 +83,10 @@ The production runtime supports two modes over the same event-hub primitives:
   EventBus awaiter, and transport deadlines. It must not create a parallel
   TaskManager, EventBus, or client run loop.
 
+Callback dispatch is independently injectable through the shared `IExecutor`
+lease defined by ADR-0005. The event-hub `ModuleHub` remains the only work
+scheduler; an injected executor changes callback placement only.
+
 The pinned `ModuleHub::next_deadline()` aggregates queued
 `EventBus::next_awaiter_deadline()` values, and `EventBus::register_awaiter()`
 notifies after releasing `m_awaiters_mutex`. The upstream tests cover managed
@@ -121,8 +125,10 @@ stop infrastructure used by another Client.
 
 The future kurlyk adapter forwards native completion directly into operation
 state; it never calls `future.get()` from an event loop or callback. Admission
-failure is synchronous and produces no callback. Post-admission executor or
-transport rejection is one terminal typed error. Kurlyk executes only retries
+failure is synchronous and produces no callback. Rejection of admitted work is
+a terminal typed error; rejection by a callback executor after terminal
+commitment suppresses delivery without rewriting the selected outcome. Kurlyk
+executes only retries
 authorized by bsky's operation/idempotency policy. Unsafe side effects disable
 automatic retry unless protocol-validated idempotency is available, and an
 uncertain side effect may still produce `OutcomeUnknown`.

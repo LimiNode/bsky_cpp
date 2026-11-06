@@ -29,7 +29,19 @@ struct OperationState {
     bool callback_started = false;
     bool callback_cleanup = false;
     bool callback_done = false;
+    bool callback_dispatch_pending = false;
     bool stop_handled = false;
+};
+
+struct CallbackDispatchGuard {
+    explicit CallbackDispatchGuard(std::weak_ptr<OperationState> value)
+        : state(std::move(value)) {}
+
+    ~CallbackDispatchGuard();
+    void operator()() noexcept;
+
+    std::weak_ptr<OperationState> state;
+    std::atomic<bool> invoked{false};
 };
 
 // Identifies reentrant lifecycle/wait calls from work, callbacks, and captures.
@@ -52,9 +64,22 @@ private:
     RuntimeCore& m_core;
 };
 
+class EventHubExecutor final : public IExecutor {
+public:
+    explicit EventHubExecutor(RuntimeCore& core) noexcept : m_core(core) {}
+
+    bool post(MoveOnlyFunction<void()> task) override;
+
+private:
+    RuntimeCore& m_core;
+};
+
 struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     explicit RuntimeCore(RuntimeOptions value) : options(std::move(value)) {
         module = &hub.emplace_module<RuntimeModule>(*this);
+        executor = options.executor
+                       ? std::move(options.executor)
+                       : std::make_shared<EventHubExecutor>(*this);
     }
 
     Result<void> start() {
@@ -234,39 +259,55 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         ErrorCategory emergency_category = result
                                                ? ErrorCategory::Internal
                                                : result.error().category();
-        bool rejected = false;
+        bool dispatch = false;
         try {
             if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (state->completed) return;
-                if (state->callback && !state->callback_closed) {
-                    bool queued = false;
-                    try {
-                        queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
-                            if (auto live = weak.lock()) live->core->deliver(live);
-                        }) != 0U;
-                    } catch (...) {}
-                    if (!queued) {
-                        emergency_category = ErrorCategory::Shutdown;
-                        if (consume_fault(RuntimeFaultPoint::DeliveryRejectionError)) {
-                            throw std::bad_alloc();
-                        }
-                        result = Result<void>::failure(Error(
-                            ErrorCategory::Shutdown, "executor rejected terminal delivery", "runtime.dispatch"));
-                        rejected = true;
-                    }
-                }
                 state->error = result ? std::nullopt
                                       : std::optional<ErrorCategory>(result.error().category());
                 state->payload.emplace(std::move(result));
                 state->completed = true;
+                if (state->callback && !state->callback_closed) {
+                    // Reserve delivery under the lifecycle mutex, but call
+                    // user-provided executor code only after releasing it.
+                    state->callback_dispatch_pending = true;
+                    dispatch = true;
+                } else {
+                    state->payload.reset();
+                    state->callback_done = true;
+                }
                 retire(state);
             }
         } catch (...) {
             emergency_complete(state, emergency_category);
         }
-        if (rejected) close_callback(state);
+        if (!dispatch) return;
+
+        try {
+            auto guard = std::make_shared<CallbackDispatchGuard>(
+                std::weak_ptr<OperationState>(state));
+            bool accepted = false;
+            try {
+                accepted = executor->post(MoveOnlyFunction<void()>(
+                    [guard]() mutable { (*guard)(); }));
+            } catch (...) {
+                accepted = false;
+            }
+            if (!accepted) {
+                if (consume_fault(RuntimeFaultPoint::DeliveryRejectionError)) {
+                    throw std::bad_alloc();
+                }
+                callback_dispatch_abandoned(state);
+            }
+        } catch (...) {
+            callback_dispatch_abandoned(state);
+        }
+    }
+
+    void callback_dispatch_abandoned(const std::shared_ptr<OperationState>& state) noexcept {
+        close_callback(state);
     }
 
     void deliver(const std::shared_ptr<OperationState>& state) {
@@ -275,10 +316,18 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (state->callback_closed || state->callback_done || state->callback_started) return;
+            state->callback_dispatch_pending = false;
             state->callback_started = true;
             callback = std::move(state->callback);
-            result.emplace(std::move(*state->payload));
-            state->payload.reset();
+            if (state->payload) {
+                result.emplace(std::move(*state->payload));
+                state->payload.reset();
+            } else {
+                state->callback_started = false;
+                state->callback_done = true;
+                retire(state);
+                return;
+            }
         }
         ExecutionScope scope(this);
         try { callback(std::move(*result)); } catch (...) {}
@@ -295,8 +344,10 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_closed = true;
             if (state->callback_started || state->callback_cleanup || state->callback_done) return;
+            state->callback_dispatch_pending = false;
             state->callback_cleanup = true;
             callback = std::move(state->callback);
+            state->payload.reset();
         }
         ExecutionScope scope(this);
         callback.reset();
@@ -464,6 +515,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     RuntimeOptions options;
     event_hub::ModuleHub hub;
     RuntimeModule* module = nullptr;
+    std::shared_ptr<IExecutor> executor;
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::mutex consumer_mutex;
@@ -492,6 +544,25 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         return false;
     }
 };
+
+bool EventHubExecutor::post(MoveOnlyFunction<void()> task) {
+    try {
+        return m_core.module->tasks().post(
+                   [task = std::move(task)]() mutable { task(); }) != 0U;
+    } catch (...) {
+        return false;
+    }
+}
+
+CallbackDispatchGuard::~CallbackDispatchGuard() {
+    if (invoked.load(std::memory_order_acquire)) return;
+    if (auto live = state.lock()) live->core->callback_dispatch_abandoned(live);
+}
+
+void CallbackDispatchGuard::operator()() noexcept {
+    if (invoked.exchange(true, std::memory_order_acq_rel)) return;
+    if (auto live = state.lock()) live->core->deliver(live);
+}
 
 std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
 

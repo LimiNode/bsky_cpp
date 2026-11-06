@@ -76,10 +76,14 @@ The client normally owns an executor lifetime lease (for example, a shared
 executor object) and each accepted operation retains that lease through
 terminal completion and callback quiescence. A borrowed executor requires an
 explicit adapter and a caller-provided lifetime guarantee. Rejection before
-admission is a synchronous `Result` failure; rejection after admission becomes
-one typed terminal dispatch error. Implementations must not silently run a
-callback synchronously as a fallback. A stopping executor must either reject
-queued callbacks through that policy or drain them under its documented rules.
+admission is a synchronous `Result` failure. Rejection of a callback after
+terminal state is committed suppresses that callback without rewriting the
+already selected outcome; rejection of admitted work remains a terminal
+`Shutdown` outcome. Implementations must not silently run a callback
+synchronously as a fallback. A stopping executor must either reject queued
+callbacks through that policy (with observable suppression) or drain them under
+its documented rules. The M1c implementation records these details in
+[ADR-0005](0005-executor-abstraction.md).
 
 The M1b `Transport::send()` interface is deliberately a low-level synchronous
 seam for owned request/response values and deterministic fakes. It is not the
