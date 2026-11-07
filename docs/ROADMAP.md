@@ -107,9 +107,11 @@ invariant or contract from an earlier one.
   non-blocking void and callback-first typed-result subset documented in
   [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md), including shared
   `IExecutor` callback dispatch with move-only tasks and observed suppression
-  when an accepted task is dropped; a blocking-transport bridge, operation
-  deadlines, and future adapters remain unimplemented. The broader acceptance
-  gate is still open.
+  when an accepted task is dropped. It also implements optional cooperative
+  operation deadlines through the existing event-hub `TaskManager`; deadlines
+  use `steady_clock`, participate in the first-winner terminal race, and never
+  forcibly interrupt running work. A blocking-transport bridge and future
+  adapters remain unimplemented. The broader acceptance gate is still open.
 - **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
   rate-limit partitions, header conversion, Lexicon datetime integration,
   WebSocket, replay, persistence, and OAuth.
