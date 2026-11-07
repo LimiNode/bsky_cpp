@@ -97,7 +97,13 @@ Runtime startup may race with stop or shutdown: external initialization and
 runtime finalization are serialized by an explicit lifecycle gate, while the
 runtime mutex remains outside upstream lifecycle calls. A stop that wins during
 startup is finalized only after initialization reaches its safe boundary and
-causes `start()` to return `Shutdown`.
+causes `start()` to return `Shutdown`. External readiness is not accepting
+readiness: `process_once()` and `next_deadline()` remain closed until startup
+has published admission, and finalization takes the consumer lease before
+calling upstream shutdown. This prevents a startup handoff from overlapping
+`process_once()` or `next_deadline()`. Teardown takes the consumer lease before
+the lifecycle gate and only then reads runtime state; upstream calls hold no
+runtime mutex.
 
 ### Ownership, cancellation, shutdown, and callbacks
 

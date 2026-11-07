@@ -297,13 +297,17 @@ public:
 
     /// Processes one non-blocking external pass.
     /// User work executes on the caller; callbacks execute on the selected
-    /// executor and all user code must remain non-blocking.
+    /// executor and all user code must remain non-blocking. This is permitted
+    /// only after a successful external `start()`; calls before readiness,
+    /// during startup, or after stop return `Conflict`.
     /// \return Number of processed work items, or a lifecycle error.
     Result<std::size_t> process_once();
 
     /// Returns the earliest runtime deadline, if one is currently known.
     /// For external mode, ready work returns now; task and queued awaiter
-    /// deadlines are aggregated. Call from the external consumer between passes.
+    /// deadlines are aggregated. Call from the external consumer between
+    /// passes after a successful `start()`; before readiness or after stop it
+    /// returns no deadline.
     /// \return Earliest deadline, if any.
     std::optional<TimePoint> next_deadline();
 

@@ -32,6 +32,7 @@ A document, example, or roadmap item is not evidence of an implementation.
   [`runtime.cpp`](../src/bsky_cpp/runtime/runtime.cpp) and
   [`tests/runtime.cpp`](../tests/runtime.cpp). Admission/stop serialization,
   startup/finalization lifecycle serialization,
+  startup/consumer handoff serialization,
   first-winner outcomes, typed move-only payload delivery, callback capture
   quiescence, bounded capacity, self-destruction, and component-isolated
   exports are covered. Typed delivery requires a nothrow-move-constructible

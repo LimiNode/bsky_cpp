@@ -88,9 +88,12 @@ loop releases its lease after upstream shutdown, avoiding self-join and a
 permanent self-owned cycle.
 
 External mode has one consumer calling `process_once()` and `next_deadline()`.
-Overlapping or reentrant processing fails with `Conflict`; it never enters the
-upstream single-consumer task manager concurrently. Work runs on that
-consumer; callbacks run on the selected executor. `next_deadline()` includes
+These calls are permitted only after external `start()` succeeds. Calls before
+readiness, while startup is resolving a stop, or after admission closes are
+rejected (`process_once()` returns `Conflict`; `next_deadline()` returns no
+value). Overlapping or reentrant processing fails with `Conflict`; it never
+enters the upstream single-consumer task manager concurrently. Work runs on
+that consumer; callbacks run on the selected executor. `next_deadline()` includes
 task and queued awaiter deadlines,
 and returns now when immediate work exists. An optional shared notifier lease
 in `RuntimeOptions` remains alive with the core. `notify()` must be short,
@@ -112,14 +115,17 @@ destruction may run user capture destructors and reenter runtime state. An
 executor may be destroyed on its callback thread and must not require a
 self-join.
 
-The finalization handoff is serialized by the core and lifecycle gates. A stop that arrives
+The finalization handoff is serialized by the core, consumer, and lifecycle
+gates. Startup does not publish an accepting external runtime until upstream
+initialization and the pending-stop decision are complete. A stop that arrives
 while an external pass owns the consumer lease leaves finalization to that pass;
 the pass rechecks the registry before handing the lease back. If no pass is
 active, stop takes the consumer lease itself. `hub.shutdown()` is never called
 concurrently with `hub.process_once()`. When callbacks run on an injected
 executor, `shutdown()` performs this same final handoff after the callback
 executor has made the registry empty; the injected executor is never used as a
-second runtime consumer.
+second runtime consumer. Teardown takes locks in consumer, lifecycle, then
+brief runtime-state order; upstream calls hold none of the runtime mutexes.
 
 Concurrent submit, cancellation, close, and shutdown are supported. Moving or
 destroying a particular public object must not race ordinary access to that

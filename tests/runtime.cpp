@@ -306,6 +306,41 @@ void startup_stop_lifecycle() {
         BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
     }
 
+    // After upstream initialization, startup still owns the lifecycle gate
+    // until readiness is published. A pending stop must keep the external
+    // consumer closed throughout that handoff.
+    {
+        Runtime runtime({RuntimeMode::External, 2U, {}});
+        Gate initialized, release_start;
+        Access::set_post_initialize_hook(runtime, [&] {
+            initialized.signal();
+            release_start.wait();
+        });
+        Result<void> start_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "post-init start did not run"));
+        std::thread starter([&] { start_result = runtime.start(); });
+        initialized.wait();
+        runtime.request_stop();
+
+        std::optional<Result<std::size_t>> process_result;
+        std::optional<Runtime::TimePoint> deadline;
+        std::thread processor([&] { process_result.emplace(runtime.process_once()); });
+        std::thread deadline_reader([&] { deadline = runtime.next_deadline(); });
+        processor.join();
+        deadline_reader.join();
+        BSKY_RUNTIME_CHECK(process_result.has_value() && !*process_result &&
+                           process_result->error().category() == ErrorCategory::Conflict);
+        BSKY_RUNTIME_CHECK(!deadline.has_value());
+
+        release_start.signal();
+        starter.join();
+        Access::set_post_initialize_hook(runtime, {});
+        BSKY_RUNTIME_CHECK(!start_result &&
+                           start_result.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+    }
+
     // Managed startup uses the same stop-before-loop handoff. The loop must
     // observe the stop request after its initialization and exit once.
     {

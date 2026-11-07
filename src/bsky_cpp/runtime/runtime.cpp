@@ -95,30 +95,33 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             starting = true;
         }
         std::function<void()> startup_hook;
+        std::function<void()> post_initialize_hook;
         try {
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 startup_hook = startup_test_hook;
+                post_initialize_hook = post_initialize_test_hook;
             }
             if (startup_hook) startup_hook();
             if (options.mode == RuntimeMode::External) {
                 std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
                 hub.set_notifier(options.notifier.get());
                 hub.initialize();
+                if (post_initialize_hook) post_initialize_hook();
                 bool stop_after_start = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
-                    ready = true;
                     starting = false;
                     stop_after_start = stopping;
+                    if (!stop_after_start) ready = true;
                     condition.notify_all();
                 }
+                lifecycle.unlock();
                 if (stop_after_start) {
-                    finalize_external_locked();
+                    finalize_external_with_consumer();
                     return Result<void>::failure(Error(
                         ErrorCategory::Shutdown, "runtime stopped during start", "runtime.start"));
                 }
-                lifecycle.unlock();
             } else {
                 // The sole managed thread runs the upstream loop. Using run()
                 // permits the last lease to end here without a self-join.
@@ -144,8 +147,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             }
             if (stop_after_start || exited_after_start) {
                 if (options.mode == RuntimeMode::External) {
-                    std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
-                    finalize_external_locked();
+                    finalize_external_with_consumer();
                 }
                 return Result<void>::failure(Error(
                     ErrorCategory::Shutdown, "runtime stopped during start", "runtime.start"));
@@ -167,8 +169,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 condition.notify_all();
             }
             if (options.mode == RuntimeMode::External) {
-                std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
-                finalize_external_locked();
+                finalize_external_with_consumer();
             } else {
                 std::lock_guard<std::mutex> lock(mutex);
                 exited = true;
@@ -200,7 +201,8 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (options.mode != RuntimeMode::External || !ready || exited) {
+            if (options.mode != RuntimeMode::External || !ready || !accepting ||
+                stopping || exited) {
                 return Result<std::size_t>::failure(Error(
                     ErrorCategory::Conflict, "runtime is not externally running", "runtime.process_once"));
             }
@@ -226,7 +228,8 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         std::optional<Runtime::TimePoint> deadline;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (options.mode != RuntimeMode::External || !ready || exited) return std::nullopt;
+            if (options.mode != RuntimeMode::External || !ready || !accepting ||
+                stopping || exited) return std::nullopt;
             external_consumer_active = true;
         }
         if (hub.has_pending()) {
@@ -588,6 +591,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         finalize_external_locked();
     }
 
+    void finalize_external_with_consumer() {
+        // Teardown order is consumer -> lifecycle -> runtime state. Startup
+        // releases lifecycle before taking this consumer lease.
+        std::unique_lock<std::mutex> consumer(consumer_mutex);
+        finalize_external();
+    }
+
     // Called only by the external single consumer or a shutdown waiter.
     void finalize_external() {
         std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
@@ -634,6 +644,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     bool external_consumer_active = false;
     std::function<void()> external_pass_hook;
     std::function<void()> startup_test_hook;
+    std::function<void()> post_initialize_test_hook;
     // Test-only gate invoked after registration while the admission mutex is held.
     std::function<void()> submit_admission_hook;
     std::atomic<std::uint32_t> fault_mask{0U};
@@ -687,6 +698,12 @@ void RuntimeTestAccess::set_startup_hook(Runtime& runtime,
                                          std::function<void()> hook) {
     std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
     runtime.m_core->startup_test_hook = std::move(hook);
+}
+
+void RuntimeTestAccess::set_post_initialize_hook(Runtime& runtime,
+                                                  std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
+    runtime.m_core->post_initialize_test_hook = std::move(hook);
 }
 
 void RuntimeTestAccess::set_external_pass_hook(Runtime& runtime,
