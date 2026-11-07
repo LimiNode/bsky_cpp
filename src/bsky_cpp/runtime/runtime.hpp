@@ -100,6 +100,38 @@ private:
     std::unique_ptr<Concept> m_target;
 };
 
+/// Move-only task accepted by an `IExecutor`.
+using ExecutorTask = MoveOnlyFunction<void()>;
+
+/// Callback-dispatch boundary used by the operation runtime.
+///
+/// `post()` takes ownership of a move-only task. Returning `true` admits the
+/// task; the executor must either invoke it once or destroy it. Destroying an
+/// admitted task is observable by the runtime and suppresses that callback,
+/// which keeps callback quiescence finite when an executor closes its queue.
+/// Implementations must enqueue asynchronously and must not invoke the task
+/// inline from `post()`. The runtime retains a shared ownership lease for the
+/// executor until all dependent callback registrations are quiescent.
+/// `post()` may be called concurrently by multiple runtime completion threads;
+/// implementations must synchronize their admission state. An implementation
+/// must not hold an internal queue lock while invoking or destroying a task:
+/// task destruction may run user capture destructors and the dispatch guard may
+/// reenter the runtime. The executor may be destroyed on the thread that runs
+/// the final callback or drops the final accepted task, so its destructor must
+/// support that lifetime and must not require a self-join.
+class IExecutor {
+public:
+    virtual ~IExecutor() = default;
+
+    /// Attempts to enqueue one move-only callback task.
+    ///
+    /// \param task Task owned by the executor after a successful admission.
+    /// \return `true` when accepted; `false` when rejected before admission.
+    /// \throws Any exception is treated by Runtime as rejection and must not
+    ///         escape into user work or callback code.
+    virtual bool post(ExecutorTask task) = 0;
+};
+
 /// Execution policy for the event-hub-backed runtime.
 enum class RuntimeMode {
     Managed,  ///< Runtime owns the ModuleHub background loop.
@@ -116,6 +148,10 @@ struct RuntimeOptions {
     /// Optional external-loop notifier lease. notify() must be non-blocking
     /// and must not reenter the runtime. Ignored by managed execution.
     std::shared_ptr<event_hub::INotifier> notifier;
+    /// Optional callback-dispatch executor. When empty, Runtime posts
+    /// callbacks through the existing ModuleHub task manager; no second
+    /// scheduler is created. The shared pointer is an explicit lifetime lease.
+    std::shared_ptr<IExecutor> executor;
 };
 
 class OperationHandle;
@@ -220,7 +256,9 @@ struct TypedResultSlot {
 }  // namespace detail
 
 /// Event-hub-cpp-backed operation runtime for non-blocking void and typed work.
-/// Work/callback execution uses one managed hub thread or the external caller.
+/// Work execution uses one managed hub thread or the external caller; callback
+/// delivery uses the selected `IExecutor` (the default adapter uses that same
+/// hub task manager).
 /// submit(), stop, shutdown, and handles support concurrent calls. External
 /// processing has one consumer; overlapping/reentrant passes return Conflict.
 /// Object destruction/moving must not race access to that same Runtime object.
@@ -249,17 +287,27 @@ public:
     Runtime& operator=(Runtime&& other) noexcept;
 
     /// Starts managed execution or initializes external execution.
+    ///
+    /// `start()` is single-admission and may race with `request_stop()` or
+    /// `shutdown()`. If stop wins before startup completes, initialization is
+    /// serialized with finalization, startup returns `Shutdown`, and no work is
+    /// admitted. A stop after successful startup closes admission normally.
     /// \return Success or a lifecycle error.
     Result<void> start();
 
     /// Processes one non-blocking external pass.
-    /// User work/callbacks execute on the caller; they must remain non-blocking.
+    /// User work executes on the caller; callbacks execute on the selected
+    /// executor and all user code must remain non-blocking. This is permitted
+    /// only after a successful external `start()`; calls before readiness,
+    /// during startup, or after stop return `Conflict`.
     /// \return Number of processed work items, or a lifecycle error.
     Result<std::size_t> process_once();
 
     /// Returns the earliest runtime deadline, if one is currently known.
     /// For external mode, ready work returns now; task and queued awaiter
-    /// deadlines are aggregated. Call from the external consumer between passes.
+    /// deadlines are aggregated. Call from the external consumer between
+    /// passes after a successful `start()`; before readiness or after stop it
+    /// returns no deadline.
     /// \return Earliest deadline, if any.
     std::optional<TimePoint> next_deadline();
 

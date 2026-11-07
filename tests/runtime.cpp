@@ -43,6 +43,70 @@ private:
     bool m_open = false;
 };
 
+class ControlledExecutor final : public IExecutor {
+public:
+    enum class State { Accept, Reject, Queued, Running, Closed, Drain, Suppress };
+
+    bool post(MoveOnlyFunction<void()> task) override {
+        bool rejected = false;
+        bool suppressed = false;
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            rejected = m_state == State::Reject || m_state == State::Closed;
+            suppressed = m_state == State::Suppress;
+            if (!rejected && !suppressed) m_tasks.emplace_back(std::move(task));
+        }
+        // User captures and the runtime guard are never destroyed while the
+        // fake's queue mutex is held.
+        if (rejected || suppressed) task.reset();
+        return !rejected;
+    }
+
+    void set_state(State state) {
+        std::vector<MoveOnlyFunction<void()>> dropped;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_state = state;
+            if (state == State::Closed || state == State::Suppress) {
+                dropped.swap(m_tasks);
+            }
+        }
+    }
+
+    bool run_one() {
+        MoveOnlyFunction<void()> task;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_tasks.empty()) return false;
+            m_state = State::Running;
+            task = std::move(m_tasks.front());
+            m_tasks.erase(m_tasks.begin());
+        }
+        task();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_state == State::Running) m_state = State::Queued;
+        }
+        return true;
+    }
+
+    void drain() {
+        set_state(State::Drain);
+        while (run_one()) {}
+        set_state(State::Accept);
+    }
+
+    std::size_t size() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_tasks.size();
+    }
+
+private:
+    mutable std::mutex m_mutex;
+    State m_state = State::Accept;
+    std::vector<MoveOnlyFunction<void()>> m_tasks;
+};
+
 struct ThrowingTypedPayload {
     explicit ThrowingTypedPayload(int input) : value(input) {}
     ThrowingTypedPayload(const ThrowingTypedPayload&) = delete;
@@ -72,8 +136,9 @@ OperationWork success() {
     return [](CancellationToken) { return Result<void>::success(); };
 }
 
-Runtime external(std::size_t limit = 2U) {
-    Runtime runtime({RuntimeMode::External, limit, {}});
+Runtime external(std::size_t limit = 2U,
+                 std::shared_ptr<IExecutor> executor = {}) {
+    Runtime runtime({RuntimeMode::External, limit, {}, std::move(executor)});
     BSKY_RUNTIME_CHECK(runtime.start());
     return runtime;
 }
@@ -178,7 +243,11 @@ void queue_rejection_is_terminal() {
         BSKY_RUNTIME_CHECK(result); // Admission committed before executor post.
         if (!reject_work) BSKY_RUNTIME_CHECK(runtime.process_once());
         BSKY_RUNTIME_CHECK(result.value().is_completed());
-        BSKY_RUNTIME_CHECK(result.value().error_category() == ErrorCategory::Shutdown);
+        if (reject_work) {
+            BSKY_RUNTIME_CHECK(result.value().error_category() == ErrorCategory::Shutdown);
+        } else {
+            BSKY_RUNTIME_CHECK(!result.value().error_category());
+        }
         BSKY_RUNTIME_CHECK(result.value().await_callback_quiescence(0ms));
         BSKY_RUNTIME_CHECK(calls == 0 && Access::registered_operations(runtime) == 0U);
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
@@ -196,6 +265,117 @@ void external_stop_without_loop() {
     BSKY_RUNTIME_CHECK(result.value().error_category() == ErrorCategory::Shutdown);
     BSKY_RUNTIME_CHECK(result.value().await_callback_quiescence(0ms));
     BSKY_RUNTIME_CHECK(calls == 0 && Access::registered_operations(runtime) == 0U);
+}
+
+void startup_stop_lifecycle() {
+    // A stop before start makes startup a synchronous Conflict and remains
+    // safely repeatable through shutdown.
+    {
+        Runtime runtime({RuntimeMode::External, 2U, {}});
+        runtime.request_stop();
+        auto start = runtime.start();
+        BSKY_RUNTIME_CHECK(!start && start.error().category() == ErrorCategory::Conflict);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // The startup gate pauses after started=true and before hub.initialize().
+    // A concurrent stop must defer finalization until initialization reaches
+    // its safe lifecycle boundary.
+    {
+        Runtime runtime({RuntimeMode::External, 2U, {}});
+        Gate startup_entered, release_start;
+        Access::set_startup_hook(runtime, [&] {
+            startup_entered.signal();
+            release_start.wait();
+        });
+        Result<void> start_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "start did not run"));
+        Result<void> shutdown_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "shutdown did not run"));
+        std::thread starter([&] { start_result = runtime.start(); });
+        startup_entered.wait();
+        std::thread stopper([&] { shutdown_result = runtime.shutdown(1s); });
+        runtime.request_stop();
+        release_start.signal();
+        starter.join();
+        stopper.join();
+        Access::set_startup_hook(runtime, {});
+        BSKY_RUNTIME_CHECK(!start_result &&
+                           start_result.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(shutdown_result);
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+    }
+
+    // After upstream initialization, startup still owns the lifecycle gate
+    // until readiness is published. A pending stop must keep the external
+    // consumer closed throughout that handoff.
+    {
+        Runtime runtime({RuntimeMode::External, 2U, {}});
+        Gate initialized, release_start;
+        Access::set_post_initialize_hook(runtime, [&] {
+            initialized.signal();
+            release_start.wait();
+        });
+        Result<void> start_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "post-init start did not run"));
+        std::thread starter([&] { start_result = runtime.start(); });
+        initialized.wait();
+        runtime.request_stop();
+
+        std::optional<Result<std::size_t>> process_result;
+        std::optional<Runtime::TimePoint> deadline;
+        std::thread processor([&] { process_result.emplace(runtime.process_once()); });
+        std::thread deadline_reader([&] { deadline = runtime.next_deadline(); });
+        processor.join();
+        deadline_reader.join();
+        BSKY_RUNTIME_CHECK(process_result.has_value() && !*process_result &&
+                           process_result->error().category() == ErrorCategory::Conflict);
+        BSKY_RUNTIME_CHECK(!deadline.has_value());
+
+        release_start.signal();
+        starter.join();
+        Access::set_post_initialize_hook(runtime, {});
+        BSKY_RUNTIME_CHECK(!start_result &&
+                           start_result.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+    }
+
+    // Managed startup uses the same stop-before-loop handoff. The loop must
+    // observe the stop request after its initialization and exit once.
+    {
+        Runtime runtime({RuntimeMode::Managed, 2U, {}});
+        Gate startup_entered, release_start;
+        Access::set_startup_hook(runtime, [&] {
+            startup_entered.signal();
+            release_start.wait();
+        });
+        Result<void> start_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "managed start did not run"));
+        std::thread starter([&] { start_result = runtime.start(); });
+        startup_entered.wait();
+        runtime.request_stop();
+        release_start.signal();
+        starter.join();
+        Access::set_startup_hook(runtime, {});
+        BSKY_RUNTIME_CHECK(!start_result &&
+                           start_result.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Repeated concurrent shutdown remains idempotent after startup.
+    {
+        auto runtime = external();
+        Result<void> first = Result<void>::failure(
+            Error(ErrorCategory::Internal, "first shutdown did not run"));
+        Result<void> second = Result<void>::failure(
+            Error(ErrorCategory::Internal, "second shutdown did not run"));
+        std::thread one([&] { first = runtime.shutdown(1s); });
+        std::thread two([&] { second = runtime.shutdown(1s); });
+        one.join();
+        two.join();
+        BSKY_RUNTIME_CHECK(first && second);
+    }
 }
 
 void terminal_allocation_failure() {
@@ -254,7 +434,7 @@ void execute_terminal_faults() {
     BSKY_RUNTIME_CHECK(callback_rejection);
     BSKY_RUNTIME_CHECK(rejection_runtime.process_once());
     BSKY_RUNTIME_CHECK(callback_rejection.value().is_completed());
-    BSKY_RUNTIME_CHECK(callback_rejection.value().error_category() == ErrorCategory::Shutdown);
+    BSKY_RUNTIME_CHECK(!callback_rejection.value().error_category());
     BSKY_RUNTIME_CHECK(callback_rejection.value().await_callback_quiescence(0ms));
     BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(rejection_runtime) == 0U);
     BSKY_RUNTIME_CHECK(rejection_runtime.shutdown(1s));
@@ -775,12 +955,151 @@ void typed_terminal_races_and_faults() {
     BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
     BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
 }
+
+void injected_executor_lifecycle() {
+    auto executor = std::make_shared<ControlledExecutor>();
+    auto runtime = external(8U, executor);
+
+    int callbacks = 0;
+    auto accepted = runtime.submit(success(), [&](Result<void> result) {
+        BSKY_RUNTIME_CHECK(result);
+        ++callbacks;
+    });
+    BSKY_RUNTIME_CHECK(accepted);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(accepted.value().is_completed());
+    BSKY_RUNTIME_CHECK(executor->size() == 1U && callbacks == 0);
+    BSKY_RUNTIME_CHECK(executor->run_one());
+    BSKY_RUNTIME_CHECK(callbacks == 1 && accepted.value().await_callback_quiescence(0ms));
+
+    auto typed = runtime.submit_typed<std::unique_ptr<int>>(
+        [](CancellationToken) {
+            return Result<std::unique_ptr<int>>::success(std::make_unique<int>(23));
+        },
+        [&callbacks](Result<std::unique_ptr<int>> result) {
+            BSKY_RUNTIME_CHECK(result && result.value() && *result.value() == 23);
+            ++callbacks;
+        });
+    BSKY_RUNTIME_CHECK(typed);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(executor->run_one());
+    BSKY_RUNTIME_CHECK(callbacks == 2);
+
+    // Rejection happens after terminal commitment and therefore suppresses
+    // delivery without rewriting a successful terminal outcome.
+    executor->set_state(ControlledExecutor::State::Reject);
+    auto rejected = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(rejected);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(rejected.value().is_completed() &&
+                       !rejected.value().error_category());
+    BSKY_RUNTIME_CHECK(rejected.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callbacks == 2);
+    executor->set_state(ControlledExecutor::State::Accept);
+
+    // An accepted queued task may be dropped by executor shutdown. Its guard
+    // closes the registration, releases captures, and wakes shutdown.
+    auto marker = std::make_shared<int>(7);
+    std::weak_ptr<int> weak_marker = marker;
+    auto closed = runtime.submit(success(), [marker, &callbacks](Result<void>) {
+        ++callbacks;
+    });
+    BSKY_RUNTIME_CHECK(closed);
+    marker.reset();
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(executor->size() == 1U);
+    executor->set_state(ControlledExecutor::State::Closed);
+    BSKY_RUNTIME_CHECK(closed.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(weak_marker.expired() && callbacks == 2);
+    BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+
+    // Suppression before execution follows the same observed-drop path.
+    executor->set_state(ControlledExecutor::State::Suppress);
+    auto suppressed = runtime.submit(success(), [&](Result<void>) { ++callbacks; });
+    BSKY_RUNTIME_CHECK(suppressed);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(suppressed.value().await_callback_quiescence(0ms));
+    BSKY_RUNTIME_CHECK(callbacks == 2);
+    executor->set_state(ControlledExecutor::State::Accept);
+
+    // Cancellation wins before work executes; completion wins once work has
+    // committed, even when callback delivery remains queued.
+    auto cancelled = runtime.submit(success(), [&](Result<void> result) {
+        BSKY_RUNTIME_CHECK(!result && result.error().category() == ErrorCategory::Cancelled);
+        ++callbacks;
+    });
+    BSKY_RUNTIME_CHECK(cancelled);
+    cancelled.value().request_cancellation();
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(executor->run_one());
+    BSKY_RUNTIME_CHECK(cancelled.value().error_category() == ErrorCategory::Cancelled);
+
+    auto completed = runtime.submit(success(), [&](Result<void> result) {
+        BSKY_RUNTIME_CHECK(result);
+        ++callbacks;
+    });
+    BSKY_RUNTIME_CHECK(completed);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    completed.value().request_cancellation();
+    BSKY_RUNTIME_CHECK(!completed.value().error_category());
+    BSKY_RUNTIME_CHECK(executor->run_one());
+
+    // A callback can close its executor and submit reentrant work without
+    // observing a core-mutex deadlock or an inline callback fallback.
+    std::optional<OperationHandle> nested;
+    auto reentrant = runtime.submit(success(), [&](Result<void>) {
+        executor->set_state(ControlledExecutor::State::Closed);
+        auto next = runtime.submit(success());
+        BSKY_RUNTIME_CHECK(next);
+        nested.emplace(next.value());
+    });
+    BSKY_RUNTIME_CHECK(reentrant);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(executor->run_one());
+    BSKY_RUNTIME_CHECK(nested.has_value());
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    BSKY_RUNTIME_CHECK(nested->is_completed());
+
+    // Drain and a throwing callback both leave the registration quiescent.
+    executor->set_state(ControlledExecutor::State::Accept);
+    auto throwing = runtime.submit(success(), [&](Result<void>) {
+        ++callbacks;
+        throw std::runtime_error("callback failure");
+    });
+    BSKY_RUNTIME_CHECK(throwing);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    executor->drain();
+    BSKY_RUNTIME_CHECK(throwing.value().await_callback_quiescence(0ms));
+
+    Gate callback_entered, release_callback;
+    auto concurrent = runtime.submit(success(), [&](Result<void>) {
+        callback_entered.signal();
+        release_callback.wait();
+        ++callbacks;
+    });
+    BSKY_RUNTIME_CHECK(concurrent);
+    BSKY_RUNTIME_CHECK(runtime.process_once());
+    std::thread callback_runner([&] { BSKY_RUNTIME_CHECK(executor->run_one()); });
+    callback_entered.wait();
+    Result<void> shutdown_result = Result<void>::failure(
+        Error(ErrorCategory::Internal, "shutdown did not run"));
+    std::thread stopper([&] { shutdown_result = runtime.shutdown(1s); });
+    release_callback.signal();
+    callback_runner.join();
+    stopper.join();
+    BSKY_RUNTIME_CHECK(shutdown_result);
+    BSKY_RUNTIME_CHECK(concurrent.value().await_callback_quiescence(0ms));
+
+    BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+    BSKY_RUNTIME_CHECK(callbacks == 6);
+}
 } // namespace
 
 int main() {
     admission_capacity_and_terminal_races();
     close_and_move_only_captures();
     queue_rejection_is_terminal();
+    startup_stop_lifecycle();
     external_stop_without_loop();
     for (auto mode : {RuntimeMode::External, RuntimeMode::Managed}) {
         running_work_and_callback_quiescence(false, mode);
@@ -798,4 +1117,5 @@ int main() {
     typed_operations();
     typed_callback_lifetime();
     typed_terminal_races_and_faults();
+    injected_executor_lifecycle();
 }

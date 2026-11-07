@@ -31,12 +31,17 @@ A document, example, or roadmap item is not evidence of an implementation.
   and tested in
   [`runtime.cpp`](../src/bsky_cpp/runtime/runtime.cpp) and
   [`tests/runtime.cpp`](../tests/runtime.cpp). Admission/stop serialization,
+  startup/finalization lifecycle serialization,
+  startup/consumer handoff serialization,
   first-winner outcomes, typed move-only payload delivery, callback capture
   quiescence, bounded capacity, self-destruction, and component-isolated
   exports are covered. Typed delivery requires a nothrow-move-constructible
-  `Result<T>`; throwing payload moves are rejected at compile time. See the
-  [runtime contract](contracts/OPERATION_RUNTIME.md) for exact guarantees and
-  remaining gates. Full M1c is not yet complete or independently approved.
+  `Result<T>`; throwing payload moves are rejected at compile time. The public
+  `IExecutor` callback-dispatch seam accepts move-only tasks, reports rejection,
+  and observes accepted-but-dropped tasks so callback quiescence remains
+  finite; the default adapter continues to use the existing `ModuleHub`. See
+  the [runtime contract](contracts/OPERATION_RUNTIME.md) for exact guarantees
+  and remaining gates. Full M1c is not yet complete or independently approved.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
   accepted documentation contract. Managed timed awaiter guarantees in the
@@ -51,10 +56,10 @@ A document, example, or roadmap item is not evidence of an implementation.
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
-- The injected public executor, blocking-transport bridge, operation deadlines,
-  and optional future adapter remain contract-only. Typed result operations are
-  implemented only through the callback-first `submit_typed<T>()` subset; this
-  does not imply a future adapter or a payload-bearing handle.
+- The blocking-transport bridge, operation deadlines, and optional future
+  adapter remain contract-only. Typed result operations are implemented only
+  through the callback-first `submit_typed<T>()` subset; this does not imply a
+  future adapter or a payload-bearing handle.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
   events/streaming, delivery/lifetime, and persistence seams.
 - DID/handle resolution and endpoint discovery remain contract-only; M1a only

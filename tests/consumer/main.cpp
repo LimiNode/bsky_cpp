@@ -8,6 +8,37 @@
 #include <chrono>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+#ifdef BSKY_CONSUMER_RUNTIME
+class ConsumerExecutor final : public bsky_cpp::runtime::IExecutor {
+public:
+    bool post(bsky_cpp::runtime::MoveOnlyFunction<void()> task) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_tasks.emplace_back(std::move(task));
+        return true;
+    }
+
+    void drain() {
+        for (;;) {
+            bsky_cpp::runtime::MoveOnlyFunction<void()> task;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_tasks.empty()) return;
+                task = std::move(m_tasks.front());
+                m_tasks.erase(m_tasks.begin());
+            }
+            task();
+        }
+    }
+
+private:
+    std::mutex m_mutex;
+    std::vector<bsky_cpp::runtime::MoveOnlyFunction<void()>> m_tasks;
+};
+#endif
 
 int main() {
     bsky_cpp::Result<int> result(42);
@@ -87,6 +118,25 @@ int main() {
         !typed_operation.value().wait_for_completion(std::chrono::seconds(1)) ||
         !typed_operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
         !typed_delivered || !typed_runtime.shutdown(std::chrono::seconds(1))) {
+        return 1;
+    }
+
+    auto injected_executor = std::make_shared<ConsumerExecutor>();
+    bsky_cpp::runtime::Runtime injected_runtime(
+        {bsky_cpp::runtime::RuntimeMode::External, 2U, {}, injected_executor});
+    if (!injected_runtime.start()) return 1;
+    std::atomic<bool> injected_delivered{false};
+    auto injected_operation = injected_runtime.submit(
+        [](bsky_cpp::CancellationToken) {
+            return bsky_cpp::Result<void>::success();
+        },
+        [&injected_delivered](bsky_cpp::Result<void> completion) {
+            injected_delivered = completion.has_value();
+        });
+    if (!injected_operation || !injected_runtime.process_once()) return 1;
+    injected_executor->drain();
+    if (!injected_operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
+        !injected_delivered || !injected_runtime.shutdown(std::chrono::seconds(1))) {
         return 1;
     }
 #endif

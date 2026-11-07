@@ -83,12 +83,27 @@ The production runtime supports two modes over the same event-hub primitives:
   EventBus awaiter, and transport deadlines. It must not create a parallel
   TaskManager, EventBus, or client run loop.
 
+Callback dispatch is independently injectable through the shared `IExecutor`
+lease defined by ADR-0005. The event-hub `ModuleHub` remains the only work
+scheduler; an injected executor changes callback placement only.
+
 The pinned `ModuleHub::next_deadline()` aggregates queued
 `EventBus::next_awaiter_deadline()` values, and `EventBus::register_awaiter()`
 notifies after releasing `m_awaiters_mutex`. The upstream tests cover managed
 `run()`/`start()` and an external notifier-driven loop, including a newly
 earlier deadline. External mode still owns its loop and must use the notifier
 and deadline contract; it does not create a parallel scheduler.
+Runtime startup may race with stop or shutdown: external initialization and
+runtime finalization are serialized by an explicit lifecycle gate, while the
+runtime mutex remains outside upstream lifecycle calls. A stop that wins during
+startup is finalized only after initialization reaches its safe boundary and
+causes `start()` to return `Shutdown`. External readiness is not accepting
+readiness: `process_once()` and `next_deadline()` remain closed until startup
+has published admission, and finalization takes the consumer lease before
+calling upstream shutdown. This prevents a startup handoff from overlapping
+`process_once()` or `next_deadline()`. Teardown takes the consumer lease before
+the lifecycle gate and only then reads runtime state; upstream calls hold no
+runtime mutex.
 
 ### Ownership, cancellation, shutdown, and callbacks
 
@@ -121,8 +136,10 @@ stop infrastructure used by another Client.
 
 The future kurlyk adapter forwards native completion directly into operation
 state; it never calls `future.get()` from an event loop or callback. Admission
-failure is synchronous and produces no callback. Post-admission executor or
-transport rejection is one terminal typed error. Kurlyk executes only retries
+failure is synchronous and produces no callback. Rejection of admitted work is
+a terminal typed error; rejection by a callback executor after terminal
+commitment suppresses delivery without rewriting the selected outcome. Kurlyk
+executes only retries
 authorized by bsky's operation/idempotency policy. Unsafe side effects disable
 automatic retry unless protocol-validated idempotency is available, and an
 uncertain side effect may still produce `OutcomeUnknown`.

@@ -29,7 +29,19 @@ struct OperationState {
     bool callback_started = false;
     bool callback_cleanup = false;
     bool callback_done = false;
+    bool callback_dispatch_pending = false;
     bool stop_handled = false;
+};
+
+struct CallbackDispatchGuard {
+    explicit CallbackDispatchGuard(std::weak_ptr<OperationState> value)
+        : state(std::move(value)) {}
+
+    ~CallbackDispatchGuard();
+    void operator()() noexcept;
+
+    std::weak_ptr<OperationState> state;
+    std::atomic<bool> invoked{false};
 };
 
 // Identifies reentrant lifecycle/wait calls from work, callbacks, and captures.
@@ -52,25 +64,64 @@ private:
     RuntimeCore& m_core;
 };
 
+class EventHubExecutor final : public IExecutor {
+public:
+    explicit EventHubExecutor(RuntimeCore& core) noexcept : m_core(core) {}
+
+    bool post(MoveOnlyFunction<void()> task) override;
+
+private:
+    RuntimeCore& m_core;
+};
+
 struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     explicit RuntimeCore(RuntimeOptions value) : options(std::move(value)) {
         module = &hub.emplace_module<RuntimeModule>(*this);
+        executor = options.executor
+                       ? std::move(options.executor)
+                       : std::make_shared<EventHubExecutor>(*this);
     }
 
     Result<void> start() {
-        std::unique_lock<std::mutex> lock(mutex);
-        if (started || stopping || options.max_in_flight == 0U) {
-            return Result<void>::failure(Error(
-                options.max_in_flight == 0U ? ErrorCategory::InvalidArgument
-                                            : ErrorCategory::Conflict,
-                "runtime cannot start", "runtime.start"));
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (started || stopping || options.max_in_flight == 0U) {
+                return Result<void>::failure(Error(
+                    options.max_in_flight == 0U ? ErrorCategory::InvalidArgument
+                                                : ErrorCategory::Conflict,
+                    "runtime cannot start", "runtime.start"));
+            }
+            started = true;
+            starting = true;
         }
-        started = true;
+        std::function<void()> startup_hook;
+        std::function<void()> post_initialize_hook;
         try {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                startup_hook = startup_test_hook;
+                post_initialize_hook = post_initialize_test_hook;
+            }
+            if (startup_hook) startup_hook();
             if (options.mode == RuntimeMode::External) {
+                std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
                 hub.set_notifier(options.notifier.get());
                 hub.initialize();
-                ready = true;
+                if (post_initialize_hook) post_initialize_hook();
+                bool stop_after_start = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    starting = false;
+                    stop_after_start = stopping;
+                    if (!stop_after_start) ready = true;
+                    condition.notify_all();
+                }
+                lifecycle.unlock();
+                if (stop_after_start) {
+                    finalize_external_with_consumer();
+                    return Result<void>::failure(Error(
+                        ErrorCategory::Shutdown, "runtime stopped during start", "runtime.start"));
+                }
             } else {
                 // The sole managed thread runs the upstream loop. Using run()
                 // permits the last lease to end here without a self-join.
@@ -81,27 +132,63 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                     self->exited = true;
                     self->condition.notify_all();
                 }).detach();
+                std::unique_lock<std::mutex> lock(mutex);
                 condition.wait(lock, [this] { return ready || exited; });
+                starting = false;
+                condition.notify_all();
             }
-            if (exited || stopping) {
+            bool stop_after_start = false;
+            bool exited_after_start = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stop_after_start = stopping;
+                exited_after_start = exited;
+                if (!exited && !stopping) accepting = true;
+            }
+            if (stop_after_start || exited_after_start) {
+                if (options.mode == RuntimeMode::External) {
+                    finalize_external_with_consumer();
+                }
                 return Result<void>::failure(Error(
                     ErrorCategory::Shutdown, "runtime stopped during start", "runtime.start"));
             }
-            accepting = true;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (exited || stopping) {
+                    return Result<void>::failure(Error(
+                        ErrorCategory::Shutdown, "runtime stopped during start", "runtime.start"));
+                }
+            }
             return Result<void>::success();
         } catch (...) {
-            stopping = true;
-            exited = true;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                starting = false;
+                accepting = false;
+                stopping = true;
+                condition.notify_all();
+            }
+            if (options.mode == RuntimeMode::External) {
+                finalize_external_with_consumer();
+            } else {
+                std::lock_guard<std::mutex> lock(mutex);
+                exited = true;
+                condition.notify_all();
+            }
             return Result<void>::failure(Error(
                 ErrorCategory::Internal, "runtime start failed", "runtime.start"));
         }
     }
 
     void loop_pass() {
-        std::lock_guard<std::mutex> lock(mutex);
-        ready = true;
-        condition.notify_all();
-        if (stopping && operations.empty()) hub.request_stop();
+        bool request_hub_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            ready = true;
+            condition.notify_all();
+            request_hub_stop = stopping && operations.empty();
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     Result<std::size_t> process_once() {
@@ -114,7 +201,8 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (options.mode != RuntimeMode::External || !ready || exited) {
+            if (options.mode != RuntimeMode::External || !ready || !accepting ||
+                stopping || exited) {
                 return Result<std::size_t>::failure(Error(
                     ErrorCategory::Conflict, "runtime is not externally running", "runtime.process_once"));
             }
@@ -140,16 +228,17 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         std::optional<Runtime::TimePoint> deadline;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (options.mode != RuntimeMode::External || !ready || exited) return std::nullopt;
+            if (options.mode != RuntimeMode::External || !ready || !accepting ||
+                stopping || exited) return std::nullopt;
             external_consumer_active = true;
-            if (hub.has_pending()) {
-                deadline = std::chrono::steady_clock::now();
-            } else {
-                deadline = hub.next_deadline();
-                const auto awaiter =
-                    hub.bus().next_awaiter_deadline(event_hub::DispatchSource::queued);
-                if (awaiter && (!deadline || *awaiter < *deadline)) deadline = awaiter;
-            }
+        }
+        if (hub.has_pending()) {
+            deadline = std::chrono::steady_clock::now();
+        } else {
+            deadline = hub.next_deadline();
+            const auto awaiter =
+                hub.bus().next_awaiter_deadline(event_hub::DispatchSource::queued);
+            if (awaiter && (!deadline || *awaiter < *deadline)) deadline = awaiter;
         }
         release_external_consumer(consumer, false);
         return deadline;
@@ -173,16 +262,17 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 return Result<OperationHandle>::failure(Error(
                     ErrorCategory::Backpressure, "operation admission limit reached", "runtime.submit"));
             }
-            // Registration and queue admission share the shutdown boundary.
+            // Register before leaving the admission boundary so stop observes
+            // the operation while its upstream task is being submitted.
             operations.emplace(state.get(), state);
             if (submit_admission_hook) submit_admission_hook();
-            try {
-                queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
-                    if (auto live = weak.lock()) live->core->execute(live);
-                }) != 0U;
-            } catch (...) {
-                // Once registered, queue rejection is a terminal failure.
-            }
+        }
+        try {
+            queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
+                if (auto live = weak.lock()) live->core->execute(live);
+            }) != 0U;
+        } catch (...) {
+            // Once registered, queue rejection is a terminal failure.
         }
         if (!queued) {
             try {
@@ -234,59 +324,89 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         ErrorCategory emergency_category = result
                                                ? ErrorCategory::Internal
                                                : result.error().category();
-        bool rejected = false;
+        bool dispatch = false;
         try {
             if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (state->completed) return;
-                if (state->callback && !state->callback_closed) {
-                    bool queued = false;
-                    try {
-                        queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
-                            if (auto live = weak.lock()) live->core->deliver(live);
-                        }) != 0U;
-                    } catch (...) {}
-                    if (!queued) {
-                        emergency_category = ErrorCategory::Shutdown;
-                        if (consume_fault(RuntimeFaultPoint::DeliveryRejectionError)) {
-                            throw std::bad_alloc();
-                        }
-                        result = Result<void>::failure(Error(
-                            ErrorCategory::Shutdown, "executor rejected terminal delivery", "runtime.dispatch"));
-                        rejected = true;
-                    }
-                }
                 state->error = result ? std::nullopt
                                       : std::optional<ErrorCategory>(result.error().category());
                 state->payload.emplace(std::move(result));
                 state->completed = true;
+                if (state->callback && !state->callback_closed) {
+                    // Reserve delivery under the lifecycle mutex, but call
+                    // user-provided executor code only after releasing it.
+                    state->callback_dispatch_pending = true;
+                    dispatch = true;
+                } else {
+                    state->payload.reset();
+                    state->callback_done = true;
+                }
                 retire(state);
             }
         } catch (...) {
             emergency_complete(state, emergency_category);
         }
-        if (rejected) close_callback(state);
+        if (!dispatch) return;
+
+        try {
+            auto guard = std::make_shared<CallbackDispatchGuard>(
+                std::weak_ptr<OperationState>(state));
+            bool accepted = false;
+            try {
+                accepted = executor->post(MoveOnlyFunction<void()>(
+                    [guard]() mutable { (*guard)(); }));
+            } catch (...) {
+                accepted = false;
+            }
+            if (!accepted) {
+                if (consume_fault(RuntimeFaultPoint::DeliveryRejectionError)) {
+                    throw std::bad_alloc();
+                }
+                callback_dispatch_abandoned(state);
+            }
+        } catch (...) {
+            callback_dispatch_abandoned(state);
+        }
+    }
+
+    void callback_dispatch_abandoned(const std::shared_ptr<OperationState>& state) noexcept {
+        close_callback(state);
     }
 
     void deliver(const std::shared_ptr<OperationState>& state) {
         CompletionCallback callback;
         std::optional<Result<void>> result;
+        bool missing_payload = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (state->callback_closed || state->callback_done || state->callback_started) return;
+            state->callback_dispatch_pending = false;
             state->callback_started = true;
             callback = std::move(state->callback);
-            result.emplace(std::move(*state->payload));
-            state->payload.reset();
+            if (state->payload) {
+                result.emplace(std::move(*state->payload));
+                state->payload.reset();
+            } else {
+                state->callback_started = false;
+                state->callback_done = true;
+                retire(state);
+                missing_payload = true;
+            }
+        }
+        if (missing_payload) {
+            return;
         }
         ExecutionScope scope(this);
         try { callback(std::move(*result)); } catch (...) {}
         callback.reset(); // Captures must be destroyed before reporting quiescence.
-        std::lock_guard<std::mutex> lock(mutex);
-        state->callback_started = false;
-        state->callback_done = true;
-        retire(state);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_started = false;
+            state->callback_done = true;
+            retire(state);
+        }
     }
 
     void close_callback(const std::shared_ptr<OperationState>& state) {
@@ -295,15 +415,19 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_closed = true;
             if (state->callback_started || state->callback_cleanup || state->callback_done) return;
+            state->callback_dispatch_pending = false;
             state->callback_cleanup = true;
             callback = std::move(state->callback);
+            state->payload.reset();
         }
         ExecutionScope scope(this);
         callback.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->callback_cleanup = false;
-        state->callback_done = true;
-        retire(state);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_cleanup = false;
+            state->callback_done = true;
+            retire(state);
+        }
     }
 
     void abandon_work(const std::shared_ptr<OperationState>& state) {
@@ -379,11 +503,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             cancel(state, ErrorCategory::Shutdown);
             abandon_work(state);
         }
+        bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (ready && operations.empty()) hub.request_stop();
+            request_hub_stop = ready && operations.empty();
             condition.notify_all();
         }
+        if (request_hub_stop) hub.request_stop();
         bool consumer_active = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -391,7 +517,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         if (options.mode == RuntimeMode::External && executing_core != this && !consumer_active) {
             std::unique_lock<std::mutex> consumer(consumer_mutex, std::try_to_lock);
-            if (consumer.owns_lock()) finalize_external();
+            if (consumer.owns_lock()) try_finalize_external();
         }
     }
 
@@ -401,11 +527,29 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         std::unique_lock<std::mutex> lock(mutex);
         if (executing_core == this) return pending(ErrorCategory::QuiescencePending,
                                                    "quiescence is pending on the current invocation");
-        if (!condition.wait_until(lock, deadline, [this] {
-                return operations.empty() && (!started || exited);
-            })) return pending(ErrorCategory::ShutdownTimedOut,
-                              "shutdown deadline expired; quiescence is pending");
-        return Result<void>::success();
+        for (;;) {
+            if (operations.empty() && (!started || exited)) return Result<void>::success();
+
+            const bool external_finalize =
+                options.mode == RuntimeMode::External && started && !exited &&
+                !starting && !external_consumer_active && operations.empty();
+            if (external_finalize) {
+                lock.unlock();
+                std::unique_lock<std::mutex> consumer(consumer_mutex);
+                finalize_external();
+                lock.lock();
+                continue;
+            }
+
+            if (!condition.wait_until(lock, deadline, [this] {
+                    return (operations.empty() && (!started || exited)) ||
+                            (options.mode == RuntimeMode::External &&
+                             !starting && operations.empty() && !external_consumer_active);
+                })) {
+                return pending(ErrorCategory::ShutdownTimedOut,
+                               "shutdown deadline expired; quiescence is pending");
+            }
+        }
     }
 
     static Result<void> pending(ErrorCategory category, const char* message) {
@@ -441,11 +585,32 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         release_external_consumer(consumer, true);
     }
 
-    // Called only by the external single consumer, never by a producer.
+    void try_finalize_external() noexcept {
+        std::unique_lock<std::mutex> lifecycle(lifecycle_mutex, std::try_to_lock);
+        if (!lifecycle.owns_lock()) return;
+        finalize_external_locked();
+    }
+
+    void finalize_external_with_consumer() {
+        // Teardown order is consumer -> lifecycle -> runtime state. Startup
+        // releases lifecycle before taking this consumer lease.
+        std::unique_lock<std::mutex> consumer(consumer_mutex);
+        finalize_external();
+    }
+
+    // Called only by the external single consumer or a shutdown waiter.
     void finalize_external() {
+        std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
+        finalize_external_locked();
+    }
+
+    // lifecycle_mutex serializes this with external startup. No runtime mutex
+    // is held while calling upstream lifecycle code.
+    void finalize_external_locked() {
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (!stopping || exited || !operations.empty()) return;
+            if (options.mode != RuntimeMode::External || !stopping || exited ||
+                starting || !operations.empty()) return;
         }
         hub.shutdown();
         std::lock_guard<std::mutex> lock(mutex);
@@ -464,17 +629,22 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     RuntimeOptions options;
     event_hub::ModuleHub hub;
     RuntimeModule* module = nullptr;
+    std::shared_ptr<IExecutor> executor;
     mutable std::mutex mutex;
     std::condition_variable condition;
+    std::mutex lifecycle_mutex;
     std::mutex consumer_mutex;
     std::unordered_map<OperationState*, std::shared_ptr<OperationState>> operations;
     bool started = false;
+    bool starting = false;
     bool ready = false;
     bool accepting = false;
     bool stopping = false;
     bool exited = false;
     bool external_consumer_active = false;
     std::function<void()> external_pass_hook;
+    std::function<void()> startup_test_hook;
+    std::function<void()> post_initialize_test_hook;
     // Test-only gate invoked after registration while the admission mutex is held.
     std::function<void()> submit_admission_hook;
     std::atomic<std::uint32_t> fault_mask{0U};
@@ -493,6 +663,25 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     }
 };
 
+bool EventHubExecutor::post(MoveOnlyFunction<void()> task) {
+    try {
+        return m_core.module->tasks().post(
+                   [task = std::move(task)]() mutable { task(); }) != 0U;
+    } catch (...) {
+        return false;
+    }
+}
+
+CallbackDispatchGuard::~CallbackDispatchGuard() {
+    if (invoked.load(std::memory_order_acquire)) return;
+    if (auto live = state.lock()) live->core->callback_dispatch_abandoned(live);
+}
+
+void CallbackDispatchGuard::operator()() noexcept {
+    if (invoked.exchange(true, std::memory_order_acq_rel)) return;
+    if (auto live = state.lock()) live->core->deliver(live);
+}
+
 std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
 
 void RuntimeTestAccess::close_executor(Runtime& runtime) {
@@ -503,6 +692,18 @@ void RuntimeTestAccess::set_admission_hook(Runtime& runtime,
                                             std::function<void()> hook) {
     std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
     runtime.m_core->submit_admission_hook = std::move(hook);
+}
+
+void RuntimeTestAccess::set_startup_hook(Runtime& runtime,
+                                         std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
+    runtime.m_core->startup_test_hook = std::move(hook);
+}
+
+void RuntimeTestAccess::set_post_initialize_hook(Runtime& runtime,
+                                                  std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
+    runtime.m_core->post_initialize_test_hook = std::move(hook);
 }
 
 void RuntimeTestAccess::set_external_pass_hook(Runtime& runtime,

@@ -21,6 +21,7 @@ client and XRPC implementation remain deferred.
 - [Codebase orientation](docs/guides/codebase-orientation.md)
 - [ADR-0001](docs/adr/0001-client-architecture.md)
 - [ADR-0002](docs/adr/0002-async-execution-contract.md)
+- [ADR-0005](docs/adr/0005-executor-abstraction.md)
 - [Reference scenarios](docs/reference-scenarios.md)
 
 The canonical documentation language is English. M0c examples remain
@@ -28,7 +29,8 @@ conceptual; the implemented runtime is selected with `BSKY_BUILD_RUNTIME=ON`.
 
 The M1c Draft currently runs non-blocking `Result<void>` work and supports
 callback-first typed `Result<T>` operations, including move-only payloads whose
-`Result<T>` move is `noexcept`. Its
+`Result<T>` move is `noexcept`, plus an optional shared `IExecutor` callback
+dispatch seam. Its
 precise lifecycle, payload ownership, install-component usage, and remaining
 gates are documented in
 [OPERATION_RUNTIME.md](docs/contracts/OPERATION_RUNTIME.md).

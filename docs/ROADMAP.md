@@ -105,9 +105,11 @@ invariant or contract from an earlier one.
   all ADR-0002 guarantees relevant to the implemented subset are covered by
   deterministic tests. The opt-in `bsky_cpp::runtime` target implements the
   non-blocking void and callback-first typed-result subset documented in
-  [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md); public executor
-  injection, a blocking-transport bridge, operation deadlines, and future
-  adapters remain unimplemented. The broader acceptance gate is still open.
+  [OPERATION_RUNTIME.md](contracts/OPERATION_RUNTIME.md), including shared
+  `IExecutor` callback dispatch with move-only tasks and observed suppression
+  when an accepted task is dropped; a blocking-transport bridge, operation
+  deadlines, and future adapters remain unimplemented. The broader acceptance
+  gate is still open.
 - **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
   rate-limit partitions, header conversion, Lexicon datetime integration,
   WebSocket, replay, persistence, and OAuth.
