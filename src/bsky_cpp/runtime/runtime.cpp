@@ -95,11 +95,11 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             starting = true;
         }
         std::function<void()> startup_hook;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            startup_hook = startup_test_hook;
-        }
         try {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                startup_hook = startup_test_hook;
+            }
             if (startup_hook) startup_hook();
             if (options.mode == RuntimeMode::External) {
                 std::unique_lock<std::mutex> lifecycle(lifecycle_mutex);
