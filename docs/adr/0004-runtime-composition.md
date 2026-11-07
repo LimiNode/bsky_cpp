@@ -214,7 +214,8 @@ exactly-one terminal outcome, cancellation/completion first-winner behavior,
 callback closure/suppression, callback-first typed `Result<T>` delivery with
 move-only payloads, move-only callbacks, post-admission executor rejection,
 shutdown/quiescence, lifetime leases, destruction safety, exception containment,
-and deterministic fake execution/race tests.
+cooperative `steady_clock` operation deadlines, and deterministic fake
+execution/race tests.
 
 M1c must not require kurlyk, XRPC, WebSocket, OAuth, persistence, or Time
 Shield Lexicon integration. The foundation remains dependency-independent.
@@ -240,7 +241,10 @@ making them mandatory for foundation consumers. It gives the production Client
 one runtime owner, prevents duplicate workers/schedulers, and makes package
 installation consequences explicit. Managed awaiter deadlines are now covered
 by the pinned upstream correction, while typed M1c operation semantics continue
-with fake execution and bounded real-clock integration tests.
+with fake execution and bounded real-clock integration tests. Operation
+deadlines reuse the same delayed task manager and do not add another scheduler;
+their detailed first-winner policy is recorded in
+[ADR-0006](0006-operation-deadlines.md).
 
 The existing M1b synchronous `Transport::send()` seam remains valid and is not
 replaced by this ADR. It is a low-level fake-friendly seam, not the application

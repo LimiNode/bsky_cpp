@@ -1093,6 +1093,232 @@ void injected_executor_lifecycle() {
     BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
     BSKY_RUNTIME_CHECK(callbacks == 6);
 }
+
+void operation_deadline_semantics() {
+    // An expired deadline commits TimedOut at admission, never starts work,
+    // and still uses the normal asynchronous callback channel.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(2U, executor);
+        std::atomic<bool> work_ran{false};
+        std::atomic<int> callbacks{0};
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() - 1ms;
+        auto operation = runtime.submit(
+            [&work_ran](CancellationToken) {
+                work_ran = true;
+                return Result<void>::success();
+            },
+            [&callbacks](Result<void> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::TimedOut);
+                ++callbacks;
+            },
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(!work_ran.load() && executor->size() == 1U);
+        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A deadline that expires before an external pass wins over queued work.
+    // The high-priority delayed task is dispatched before the normal work task.
+    {
+        auto runtime = external();
+        std::atomic<bool> work_ran{false};
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 20ms;
+        auto operation = runtime.submit(
+            [&work_ran](CancellationToken) {
+                work_ran = true;
+                return Result<void>::success();
+            }, {}, options);
+        BSKY_RUNTIME_CHECK(operation);
+        const auto deadline = options.deadline.value();
+        BSKY_RUNTIME_CHECK(runtime.next_deadline().has_value());
+        std::this_thread::sleep_until(deadline + 1ms);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(!work_ran.load());
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Cancellation before the deadline cancels the delayed task.  The
+    // operation remains Cancelled even when the original deadline passes.
+    {
+        auto runtime = external();
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 10ms;
+        auto operation = runtime.submit(success(), {}, options);
+        BSKY_RUNTIME_CHECK(operation);
+        operation.value().request_cancellation();
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Cancelled);
+        std::this_thread::sleep_for(20ms);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Cancelled);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A completion committed before the deadline must not have its
+    // cancellation token changed by a later timer callback.
+    {
+        auto runtime = external();
+        auto observed_token = std::make_shared<CancellationToken>();
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 15ms;
+        auto operation = runtime.submit(
+            [observed_token](CancellationToken token) {
+                *observed_token = token;
+                return Result<void>::success();
+            }, {}, options);
+        BSKY_RUNTIME_CHECK(operation);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == std::nullopt);
+        std::this_thread::sleep_for(25ms);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(!observed_token->is_cancellation_requested());
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Deadlines are cooperative: a running user function is not preempted.
+    // Even if the wall time passes, its successful terminal result wins when
+    // it returns before the scheduler gets another dispatch point.
+    {
+        auto runtime = external();
+        Gate entered, release;
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 10ms;
+        auto operation = runtime.submit(
+            [&](CancellationToken) {
+                entered.signal();
+                release.wait();
+                return Result<void>::success();
+            }, {}, options);
+        BSKY_RUNTIME_CHECK(operation);
+        std::thread consumer([&] { BSKY_RUNTIME_CHECK(runtime.process_once()); });
+        entered.wait();
+        std::this_thread::sleep_for(20ms);
+        release.signal();
+        consumer.join();
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == std::nullopt);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Typed operations use the same timeout outcome and callback executor.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(2U, executor);
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() - 1ms;
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_typed<std::unique_ptr<int>>(
+            [](CancellationToken) {
+                return Result<std::unique_ptr<int>>::success(std::make_unique<int>(3));
+            },
+            [&callbacks](Result<std::unique_ptr<int>> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::TimedOut);
+                ++callbacks;
+            },
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Managed mode is driven by the same delayed TaskManager entry; no
+    // private timer thread is needed for an operation deadline.
+    {
+        Runtime runtime;
+        BSKY_RUNTIME_CHECK(runtime.start());
+        std::atomic<int> callbacks{0};
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() - 1ms;
+        auto operation = runtime.submit(
+            success(),
+            [&callbacks](Result<void> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::TimedOut);
+                ++callbacks;
+            },
+            options);
+        BSKY_RUNTIME_CHECK(operation);
+        BSKY_RUNTIME_CHECK(operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(operation.value().await_callback_quiescence(1s));
+        BSKY_RUNTIME_CHECK(callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Closing a queued timeout callback suppresses delivery without changing
+    // the already committed TimedOut terminal state.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(2U, executor);
+        std::atomic<int> callbacks{0};
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() - 1ms;
+        auto operation = runtime.submit(
+            success(),
+            [&callbacks](Result<void>) { ++callbacks; },
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        operation.value().close_callback();
+        BSKY_RUNTIME_CHECK(operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(callbacks == 0 &&
+                           operation.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A delayed-task registration can be rejected after admission when the
+    // upstream task manager is already closed.  This remains an admitted
+    // handle with a typed Shutdown outcome and no user work.
+    {
+        auto runtime = external();
+        Access::close_executor(runtime);
+        std::atomic<bool> work_ran{false};
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 1s;
+        auto operation = runtime.submit(
+            [&work_ran](CancellationToken) {
+                work_ran = true;
+                return Result<void>::success();
+            },
+            {},
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(!work_ran.load() &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Shutdown suppresses a timeout callback that is still queued on an
+    // injected executor; it does not manufacture a second terminal outcome.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(2U, executor);
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() - 1ms;
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit(
+            success(),
+            [&callbacks](Result<void>) { ++callbacks; },
+            options);
+        BSKY_RUNTIME_CHECK(operation && executor->size() == 1U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(0ms));
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(callbacks == 0);
+        executor->set_state(ControlledExecutor::State::Closed);
+    }
+}
 } // namespace
 
 int main() {
@@ -1118,4 +1344,5 @@ int main() {
     typed_callback_lifetime();
     typed_terminal_races_and_faults();
     injected_executor_lifecycle();
+    operation_deadline_semantics();
 }

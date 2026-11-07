@@ -6,7 +6,8 @@ This describes the Draft implementation in
 [ADR-0004](../adr/0004-runtime-composition.md). It implements non-blocking
 `Result<void>` work, typed `Result<T>` work, and one optional move-only
 terminal callback per operation. It is a runtime primitive, not a high-level
-Client or a network implementation.
+Client or a network implementation. An admitted operation may also carry an
+absolute monotonic deadline through `OperationOptions`.
 
 ## Admission, cancellation, and delivery
 
@@ -22,6 +23,18 @@ mutex; queue posting happens after that mutex is released, while the registered
 state keeps shutdown from losing an admitted operation.
 `Backpressure` means the configured number of operations is still retained
 through work and callback cleanup, including queued and running delivery.
+
+`OperationOptions::deadline` is an optional absolute
+`std::chrono::steady_clock::time_point`. An already expired deadline is still
+an admitted operation: it records `TimedOut`, requests cooperative
+cancellation, skips user work, and dispatches the terminal callback
+asynchronously. A deadline task uses the runtime's existing event-hub
+`TaskManager`; it never starts a per-operation thread or a second scheduler.
+If the deadline wins the terminal race, later success or failure cannot replace
+it. If completion or explicit cancellation wins first, the timer is cancelled
+or ignored and cannot request cancellation afterwards. A running work function
+is not forcibly interrupted, so a deadline may be observed only when the
+scheduler reaches its dispatch point after that function returns.
 
 The first terminal contender wins. Explicit cancellation records `Cancelled`;
 shutdown records `Shutdown`. Later work completion/cancellation cannot replace
@@ -94,12 +107,13 @@ rejected (`process_once()` returns `Conflict`; `next_deadline()` returns no
 value). Overlapping or reentrant processing fails with `Conflict`; it never
 enters the upstream single-consumer task manager concurrently. Work runs on
 that consumer; callbacks run on the selected executor. `next_deadline()` includes
-task and queued awaiter deadlines,
+operation timers, task and queued awaiter deadlines,
 and returns now when immediate work exists. An optional shared notifier lease
 in `RuntimeOptions` remains alive with the core. `notify()` must be short,
 non-blocking, and must not reenter the runtime. Read the notifier generation
 before processing and use its generation-aware wait after processing to avoid
-lost wakeups. No borrowed notifier overload is provided.
+lost wakeups. Adding or cancelling an operation deadline wakes the configured
+external notifier. No borrowed notifier overload is provided.
 
 `RuntimeOptions::executor` is a shared lifetime lease for callback dispatch.
 It accepts move-only tasks through `IExecutor::post()`, reports pre-admission
@@ -202,15 +216,19 @@ registry cleanup, and capacity. The fake covers accepted, rejected, queued,
 running, closed, drained, and suppressed states. A private admission gate
 makes the producer/stop boundary deterministic without adding a production
 hook.
+Deadline cases cover already-expired admission, external and managed
+dispatch, cancellation and completion races, typed timeout delivery,
+callback suppression, capacity reuse, and the cooperative no-preemption rule.
 Gate-controlled threads test running
 typed work/cancellation, running work/callback shutdown, concurrent
 admission/cancel/stop, overlapping external passes, self-waits, and runtime
 destruction on its own managed/external callback. Startup gates cover
 stop-before-start, stop during external initialization, managed startup races,
 and repeated concurrent shutdown without a second hub consumer.
-Assertions fail the test process in Debug and Release. No sleep is used for
-test synchronization. Installed consumers and package-isolation checks run in
-CI together with runtime OFF/ON, Doxygen and Ubuntu ASan/UBSan.
+Assertions fail the test process in Debug and Release. Lifecycle tests use
+handshakes rather than sleeps; scheduler integration cases use only bounded
+steady-clock waits. Installed consumers and package-isolation checks run in CI
+together with runtime OFF/ON, Doxygen and Ubuntu ASan/UBSan.
 
 Managed timed awaiters are supported by the pinned snapshot. Upstream PR #13
 adds queued awaiter deadline aggregation to `ModuleHub` and notifies the loop
@@ -218,9 +236,9 @@ after awaiter registration, including when a newly registered deadline is
 earlier than the current wait. Explicit `ModuleHub::request_stop()` continues
 to wake its loop.
 
-Still unimplemented: the blocking-transport bridge, operation deadlines,
-future adapters, high-level Client, XRPC, kurlyk, OAuth, WebSocket, and
-persistence. M1c remains partial and Draft pending independent source review;
+Still unimplemented: the blocking-transport bridge, future adapters,
+high-level Client, XRPC, kurlyk, OAuth, WebSocket, and persistence. M1c remains
+partial and Draft pending independent source review;
 this contract does not claim that all items in the broader async conformance
 plan are delivered. TSan is run as a
 separate Linux job when supported by the toolchain; stress tests and ASan/UBSan
