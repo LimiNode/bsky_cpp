@@ -36,6 +36,14 @@ provided in this milestone.
    observable to the runtime through a private dispatch guard and suppresses
    the callback, so a closed queue cannot leave an operation waiting forever.
 
+The runtime may call `post()` concurrently from multiple completion threads.
+Executor implementations must synchronize admission and must not hold an
+internal queue lock while invoking or destroying a task. Task destruction may
+run user capture destructors and the dispatch guard may reenter the runtime.
+The runtime does not stop or join an injected executor; its destructor may run
+on the callback thread when that thread releases the final shared lease, so an
+executor must support that lifetime without self-joining.
+
 An exception from `post()` is treated as rejection. Rejection before callback
 admission never runs a callback. If terminal state was already committed,
 executor rejection does not rewrite that terminal outcome; it closes the

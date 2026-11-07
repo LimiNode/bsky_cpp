@@ -12,8 +12,14 @@ Client or a network implementation.
 
 `start()` enables admission once. Zero capacity is `InvalidArgument`; restart
 is `Conflict`. Validation or capacity rejection is synchronous and invokes no
-callback. Registration, capacity accounting, queue posting, and closing
-admission share one mutex, so shutdown cannot miss an admitted operation.
+callback. Startup may race with `request_stop()` or `shutdown()`: the runtime
+serializes external `ModuleHub::initialize()` and `hub.shutdown()` through a
+separate lifecycle gate. If stop wins before startup completes, startup
+returns `Shutdown`, finalization happens after initialization reaches a safe
+boundary, and no work is admitted. A stop after successful startup closes
+admission normally. Registration and capacity accounting share the runtime
+mutex; queue posting happens after that mutex is released, while the registered
+state keeps shutdown from losing an admitted operation.
 `Backpressure` means the configured number of operations is still retained
 through work and callback cleanup, including queued and running delivery.
 
@@ -99,9 +105,14 @@ run once or be destroyed; destruction is observable and suppresses the
 registration. The runtime never owns or stops an injected executor. If its
 queue remains open but does not drain, shutdown may time out; closing or
 draining that queue is the application's responsibility. The default adapter
-keeps the previous event-hub callback behavior.
+keeps the previous event-hub callback behavior. `post()` may be called
+concurrently by completion threads. Executor implementations must not hold
+their internal queue lock while invoking or destroying tasks, because task
+destruction may run user capture destructors and reenter runtime state. An
+executor may be destroyed on its callback thread and must not require a
+self-join.
 
-The finalization handoff is serialized by the core mutex. A stop that arrives
+The finalization handoff is serialized by the core and lifecycle gates. A stop that arrives
 while an external pass owns the consumer lease leaves finalization to that pass;
 the pass rechecks the registry before handing the lease back. If no pass is
 active, stop takes the consumer lease itself. `hub.shutdown()` is never called
@@ -188,7 +199,9 @@ hook.
 Gate-controlled threads test running
 typed work/cancellation, running work/callback shutdown, concurrent
 admission/cancel/stop, overlapping external passes, self-waits, and runtime
-destruction on its own managed/external callback.
+destruction on its own managed/external callback. Startup gates cover
+stop-before-start, stop during external initialization, managed startup races,
+and repeated concurrent shutdown without a second hub consumer.
 Assertions fail the test process in Debug and Release. No sleep is used for
 test synchronization. Installed consumers and package-isolation checks run in
 CI together with runtime OFF/ON, Doxygen and Ubuntu ASan/UBSan.

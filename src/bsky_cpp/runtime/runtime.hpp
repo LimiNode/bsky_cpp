@@ -112,6 +112,13 @@ using ExecutorTask = MoveOnlyFunction<void()>;
 /// Implementations must enqueue asynchronously and must not invoke the task
 /// inline from `post()`. The runtime retains a shared ownership lease for the
 /// executor until all dependent callback registrations are quiescent.
+/// `post()` may be called concurrently by multiple runtime completion threads;
+/// implementations must synchronize their admission state. An implementation
+/// must not hold an internal queue lock while invoking or destroying a task:
+/// task destruction may run user capture destructors and the dispatch guard may
+/// reenter the runtime. The executor may be destroyed on the thread that runs
+/// the final callback or drops the final accepted task, so its destructor must
+/// support that lifetime and must not require a self-join.
 class IExecutor {
 public:
     virtual ~IExecutor() = default;
@@ -280,6 +287,11 @@ public:
     Runtime& operator=(Runtime&& other) noexcept;
 
     /// Starts managed execution or initializes external execution.
+    ///
+    /// `start()` is single-admission and may race with `request_stop()` or
+    /// `shutdown()`. If stop wins before startup completes, initialization is
+    /// serialized with finalization, startup returns `Shutdown`, and no work is
+    /// admitted. A stop after successful startup closes admission normally.
     /// \return Success or a lifecycle error.
     Result<void> start();
 

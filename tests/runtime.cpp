@@ -267,6 +267,82 @@ void external_stop_without_loop() {
     BSKY_RUNTIME_CHECK(calls == 0 && Access::registered_operations(runtime) == 0U);
 }
 
+void startup_stop_lifecycle() {
+    // A stop before start makes startup a synchronous Conflict and remains
+    // safely repeatable through shutdown.
+    {
+        Runtime runtime({RuntimeMode::External, 2U, {}});
+        runtime.request_stop();
+        auto start = runtime.start();
+        BSKY_RUNTIME_CHECK(!start && start.error().category() == ErrorCategory::Conflict);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // The startup gate pauses after started=true and before hub.initialize().
+    // A concurrent stop must defer finalization until initialization reaches
+    // its safe lifecycle boundary.
+    {
+        Runtime runtime({RuntimeMode::External, 2U, {}});
+        Gate startup_entered, release_start;
+        Access::set_startup_hook(runtime, [&] {
+            startup_entered.signal();
+            release_start.wait();
+        });
+        Result<void> start_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "start did not run"));
+        Result<void> shutdown_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "shutdown did not run"));
+        std::thread starter([&] { start_result = runtime.start(); });
+        startup_entered.wait();
+        std::thread stopper([&] { shutdown_result = runtime.shutdown(1s); });
+        runtime.request_stop();
+        release_start.signal();
+        starter.join();
+        stopper.join();
+        Access::set_startup_hook(runtime, {});
+        BSKY_RUNTIME_CHECK(!start_result &&
+                           start_result.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(shutdown_result);
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+    }
+
+    // Managed startup uses the same stop-before-loop handoff. The loop must
+    // observe the stop request after its initialization and exit once.
+    {
+        Runtime runtime({RuntimeMode::Managed, 2U, {}});
+        Gate startup_entered, release_start;
+        Access::set_startup_hook(runtime, [&] {
+            startup_entered.signal();
+            release_start.wait();
+        });
+        Result<void> start_result = Result<void>::failure(
+            Error(ErrorCategory::Internal, "managed start did not run"));
+        std::thread starter([&] { start_result = runtime.start(); });
+        startup_entered.wait();
+        runtime.request_stop();
+        release_start.signal();
+        starter.join();
+        Access::set_startup_hook(runtime, {});
+        BSKY_RUNTIME_CHECK(!start_result &&
+                           start_result.error().category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Repeated concurrent shutdown remains idempotent after startup.
+    {
+        auto runtime = external();
+        Result<void> first = Result<void>::failure(
+            Error(ErrorCategory::Internal, "first shutdown did not run"));
+        Result<void> second = Result<void>::failure(
+            Error(ErrorCategory::Internal, "second shutdown did not run"));
+        std::thread one([&] { first = runtime.shutdown(1s); });
+        std::thread two([&] { second = runtime.shutdown(1s); });
+        one.join();
+        two.join();
+        BSKY_RUNTIME_CHECK(first && second);
+    }
+}
+
 void terminal_allocation_failure() {
     auto runtime = external(1U);
     int callbacks = 0;
@@ -988,6 +1064,7 @@ int main() {
     admission_capacity_and_terminal_races();
     close_and_move_only_captures();
     queue_rejection_is_terminal();
+    startup_stop_lifecycle();
     external_stop_without_loop();
     for (auto mode : {RuntimeMode::External, RuntimeMode::Managed}) {
         running_work_and_callback_quiescence(false, mode);

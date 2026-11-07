@@ -93,6 +93,11 @@ notifies after releasing `m_awaiters_mutex`. The upstream tests cover managed
 `run()`/`start()` and an external notifier-driven loop, including a newly
 earlier deadline. External mode still owns its loop and must use the notifier
 and deadline contract; it does not create a parallel scheduler.
+Runtime startup may race with stop or shutdown: external initialization and
+runtime finalization are serialized by an explicit lifecycle gate, while the
+runtime mutex remains outside upstream lifecycle calls. A stop that wins during
+startup is finalized only after initialization reaches its safe boundary and
+causes `start()` to return `Shutdown`.
 
 ### Ownership, cancellation, shutdown, and callbacks
 
