@@ -66,4 +66,3 @@ managed mode the existing hub loop waits for and dispatches the timer.
   the upstream scheduler. State-machine races use a private seam that invokes
   the production timeout transition directly, without sleeps or a second timer
   implementation.
-
