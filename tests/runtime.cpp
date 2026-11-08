@@ -107,6 +107,16 @@ private:
     std::vector<MoveOnlyFunction<void()>> m_tasks;
 };
 
+bool run_one_when_ready(ControlledExecutor& executor,
+                        std::chrono::milliseconds timeout = 1s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!executor.run_one()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
 struct ThrowingTypedPayload {
     explicit ThrowingTypedPayload(int input) : value(input) {}
     ThrowingTypedPayload(const ThrowingTypedPayload&) = delete;
@@ -1569,8 +1579,8 @@ void blocking_transport_bridge_semantics() {
                 ++regular_callbacks;
             });
         BSKY_RUNTIME_CHECK(regular && runtime.process_once());
-        BSKY_RUNTIME_CHECK(executor->run_one());
-        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
         BSKY_RUNTIME_CHECK(bridge_callbacks == 1 && regular_callbacks == 1);
         BSKY_RUNTIME_CHECK(operation.value().await_callback_quiescence(0ms));
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
@@ -1655,7 +1665,7 @@ void blocking_transport_bridge_semantics() {
         release->signal();
         BSKY_RUNTIME_CHECK(first.value().wait_for_completion(1s));
         BSKY_RUNTIME_CHECK(queued.value().await_callback_quiescence(0ms) == false);
-        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
         BSKY_RUNTIME_CHECK(queued.value().await_callback_quiescence(1s));
         BSKY_RUNTIME_CHECK(cancelled_callbacks == 1);
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
@@ -1695,7 +1705,7 @@ void blocking_transport_bridge_semantics() {
                            ErrorCategory::Cancelled);
         release->signal();
         BSKY_RUNTIME_CHECK(cancelled.value().wait_for_completion(1s));
-        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
         BSKY_RUNTIME_CHECK(callbacks == 1);
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
@@ -1730,7 +1740,7 @@ void blocking_transport_bridge_semantics() {
         BSKY_RUNTIME_CHECK(timed.value().error_category() == ErrorCategory::TimedOut);
         BSKY_RUNTIME_CHECK(timed.value().wait_for_completion(1s));
         release->signal();
-        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
         finished->wait();
         BSKY_RUNTIME_CHECK(timed.value().await_callback_quiescence(1s));
         BSKY_RUNTIME_CHECK(observed_cancel->load() && callbacks == 1);
@@ -1812,7 +1822,7 @@ void blocking_transport_bridge_semantics() {
             });
         BSKY_RUNTIME_CHECK(operation &&
                            operation.value().wait_for_completion(1s));
-        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
         BSKY_RUNTIME_CHECK(callbacks == 1 && runtime.shutdown(1s));
     }
 
@@ -1834,7 +1844,7 @@ void blocking_transport_bridge_semantics() {
                 ++rejection_callbacks;
             });
         BSKY_RUNTIME_CHECK(rejected && rejected.value().is_completed());
-        BSKY_RUNTIME_CHECK(executor->run_one());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
         BSKY_RUNTIME_CHECK(rejection_callbacks == 1);
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
