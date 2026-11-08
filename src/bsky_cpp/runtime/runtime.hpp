@@ -272,8 +272,27 @@ namespace detail {
 /// Shared typed terminal payload slot. It owns no user work or callback.
 template <typename T>
 struct TypedResultSlot {
+    /// Synchronizes producer completion with callback delivery. A running
+    /// operation may finish its work after cancellation/timeout has already
+    /// delivered the terminal callback.
+    mutable std::mutex mutex;
     /// Terminal typed result retained until callback delivery.
     std::shared_ptr<Result<T>> result;
+
+    void store(std::shared_ptr<Result<T>> value) noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        result = std::move(value);
+    }
+
+    std::shared_ptr<Result<T>> take() noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        return std::move(result);
+    }
+
+    void clear() noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        result.reset();
+    }
 };
 
 }  // namespace detail
@@ -410,11 +429,15 @@ public:
         OperationWork erased_work = [work = std::move(work), slot](
                                         CancellationToken token) mutable {
             auto typed = work(token);
-            slot->result = std::make_shared<Result<T>>(std::move(typed));
-            if (*slot->result) {
+            auto produced = std::make_shared<Result<T>>(std::move(typed));
+            const bool success = static_cast<bool>(*produced);
+            std::optional<Error> error;
+            if (!success) error.emplace(produced->error());
+            slot->store(std::move(produced));
+            if (success) {
                 return Result<void>::success();
             }
-            return Result<void>::failure(Error(slot->result->error()));
+            return Result<void>::failure(std::move(*error));
         };
 
         CompletionCallback erased_callback;
@@ -422,15 +445,15 @@ public:
             erased_callback = [callback = std::move(callback), slot](
                                   Result<void> terminal) mutable {
                 if (!terminal) {
-                    slot->result.reset();
+                    slot->clear();
                     callback(Result<T>::failure(
                         Error(terminal.error())));
                     return;
                 }
 
-                if (slot->result) {
-                    auto typed = std::move(*slot->result);
-                    slot->result.reset();
+                auto produced = slot->take();
+                if (produced) {
+                    auto typed = std::move(*produced);
                     callback(std::move(typed));
                     return;
                 }

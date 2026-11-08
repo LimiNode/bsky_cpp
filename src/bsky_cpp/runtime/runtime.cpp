@@ -401,10 +401,14 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                               request = std::move(request), slot](
                                  CancellationToken token) mutable {
             auto response = transport->send(request, token);
-            slot->result = std::make_shared<Result<TransportResponse>>(
+            auto produced = std::make_shared<Result<TransportResponse>>(
                 std::move(response));
-            if (*slot->result) return Result<void>::success();
-            return Result<void>::failure(Error(slot->result->error()));
+            const bool success = static_cast<bool>(*produced);
+            std::optional<Error> error;
+            if (!success) error.emplace(produced->error());
+            slot->store(std::move(produced));
+            if (success) return Result<void>::success();
+            return Result<void>::failure(std::move(*error));
         };
 
         CompletionCallback erased_callback;
@@ -412,15 +416,14 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             erased_callback = [callback = std::move(callback), slot](
                                   Result<void> terminal) mutable {
                 if (!terminal) {
-                    slot->result.reset();
+                    slot->clear();
                     callback(Result<TransportResponse>::failure(
                         Error(terminal.error())));
                     return;
                 }
-                if (slot->result) {
-                    auto response = std::move(*slot->result);
-                    slot->result.reset();
-                    callback(std::move(response));
+                auto produced = slot->take();
+                if (produced) {
+                    callback(std::move(*produced));
                     return;
                 }
                 callback(Result<TransportResponse>::failure(Error(
