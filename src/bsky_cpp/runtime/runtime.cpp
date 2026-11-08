@@ -811,6 +811,10 @@ void RuntimeTestAccess::inject_fault(Runtime& runtime, RuntimeFaultPoint point) 
     runtime.m_core->fault_mask.fetch_or(bit, std::memory_order_release);
 }
 
+void RuntimeTestAccess::force_timeout(const OperationHandle& operation) noexcept {
+    if (operation.m_state) operation.m_state->core->timeout(operation.m_state);
+}
+
 std::size_t RuntimeTestAccess::registered_operations(Runtime& runtime) {
     std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
     return runtime.m_core->operations.size();

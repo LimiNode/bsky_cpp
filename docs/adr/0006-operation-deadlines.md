@@ -21,6 +21,12 @@ converted from or compared with wall-clock time. Existing two-argument
 `submit(work, callback)` and `submit_typed(work, callback)` calls remain valid;
 the options object is a trailing defaulted argument.
 
+This pre-1.0 SDK promises source compatibility for those call forms, not
+binary compatibility for already-linked consumers. Adding the third parameter
+changes the C++ symbol of the exported `Runtime::submit` function. Once a
+stable ABI is required, the original two-argument overload must be retained as
+a forwarding symbol in a separately reviewed compatibility change.
+
 The runtime registers one delayed task with the existing event-hub
 `TaskManager`. It does not create a timer thread, polling loop, event bus, or a
 second scheduler. The operation state keeps only the task id needed to cancel
@@ -56,7 +62,8 @@ managed mode the existing hub loop waits for and dispatches the timer.
   destructors short and cooperative.
 - Operation deadlines, transport-level request timeouts, and
   `shutdown(timeout)` remain distinct policies and error paths.
-- Tests use an already-expired deadline and bounded steady-clock waits for the
-  upstream scheduler. State-machine races are checked without sleeps or a
-  second timer implementation.
+- Tests use an already-expired deadline and one bounded steady-clock wait for
+  the upstream scheduler. State-machine races use a private seam that invokes
+  the production timeout transition directly, without sleeps or a second timer
+  implementation.
 

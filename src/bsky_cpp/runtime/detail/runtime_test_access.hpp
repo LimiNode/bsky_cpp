@@ -5,6 +5,7 @@
 
 namespace bsky_cpp::runtime {
 class Runtime;
+class OperationHandle;
 namespace detail {
 enum class RuntimeFaultPoint {
     Terminalization,
@@ -22,6 +23,9 @@ struct RuntimeTestAccess {
     static void set_admission_hook(Runtime& runtime, std::function<void()> hook);
     static void set_external_pass_hook(Runtime& runtime, std::function<void()> hook);
     static void inject_fault(Runtime& runtime, RuntimeFaultPoint point);
+    // Test-only deterministic transition seam. It invokes the production
+    // timeout state transition without adding another scheduler.
+    static void force_timeout(const OperationHandle& operation) noexcept;
 };
 }
 }

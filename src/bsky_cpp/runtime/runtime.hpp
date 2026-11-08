@@ -226,6 +226,7 @@ private:
     std::shared_ptr<detail::OperationState> m_state;
     friend class Runtime;
     friend struct detail::RuntimeCore;
+    friend struct detail::RuntimeTestAccess;
 };
 
 /// Non-blocking operation work accepted by the M1c runtime.

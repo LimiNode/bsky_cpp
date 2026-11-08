@@ -204,6 +204,10 @@ Runtime is in a separate export set and alone invokes the transitive
 `find_dependency(event-hub-cpp CONFIG)`. This is a migration from the initial
 Draft's implicit runtime import; foundation API names and includes are unchanged.
 `Backpressure` is appended to the category enum to preserve existing ordinals.
+The trailing `OperationOptions` parameter preserves source compatibility for
+the existing two-argument submit forms. This pre-1.0 SDK does not promise
+binary compatibility; a future stable ABI would retain the original overload
+as a forwarding symbol.
 
 ## Evidence and remaining gates
 
@@ -219,6 +223,9 @@ hook.
 Deadline cases cover already-expired admission, external and managed
 dispatch, cancellation and completion races, typed timeout delivery,
 callback suppression, capacity reuse, and the cooperative no-preemption rule.
+The private test access seam can invoke the production timeout transition
+directly, so first-winner cases do not depend on host thread scheduling; one
+separate bounded steady-clock case covers the real delayed-task integration.
 Gate-controlled threads test running
 typed work/cancellation, running work/callback shutdown, concurrent
 admission/cancel/stop, overlapping external passes, self-waits, and runtime
