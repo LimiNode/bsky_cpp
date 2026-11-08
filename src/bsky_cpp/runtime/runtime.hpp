@@ -5,6 +5,7 @@
 #include "bsky_cpp/core/bsky_error.hpp"
 #include "bsky_cpp/core/cancellation.hpp"
 #include "bsky_cpp/core/result.hpp"
+#include "bsky_cpp/transport/transport.hpp"
 
 #include <event_hub/notifier.hpp>
 
@@ -152,6 +153,10 @@ struct RuntimeOptions {
     /// callbacks through the existing ModuleHub task manager; no second
     /// scheduler is created. The shared pointer is an explicit lifetime lease.
     std::shared_ptr<IExecutor> executor;
+    /// Maximum number of admitted blocking-transport jobs, including queued
+    /// and running work. Zero leaves the blocking bridge disabled and avoids
+    /// creating its bounded private worker.
+    std::size_t max_blocking_in_flight = 0U;
 };
 
 class OperationHandle;
@@ -281,8 +286,9 @@ struct TypedResultSlot {
 /// processing has one consumer; overlapping/reentrant passes return Conflict.
 /// Object destruction/moving must not race access to that same Runtime object.
 /// Work, callbacks, notifier calls, and capture destructors must be short.
-/// No network I/O, blocking-transport bridge, or future adapter is implemented
-/// here. Operation deadlines use the pinned event-hub-cpp delayed-task API and
+/// Blocking transport work, when explicitly enabled, runs on one bounded
+/// event-hub private worker and never on the hub loop. No future adapter is
+/// implemented here. Operation deadlines use the pinned event-hub-cpp delayed-task API and
 /// request cooperative cancellation; they do not forcibly interrupt running
 /// user work. Managed timed awaiters rely on the pinned event-hub-cpp deadline
 /// aggregation and registration wake-up correction.
@@ -340,6 +346,30 @@ public:
     Result<OperationHandle> submit(OperationWork work,
                                    CompletionCallback callback = {},
                                    OperationOptions options = {});
+
+    /// Executes one synchronous Transport::send() call on the bounded
+    /// blocking bridge lane and delivers its owned response asynchronously.
+    ///
+    /// The bridge uses one event-hub private worker for this Runtime. Admission
+    /// is bounded by `RuntimeOptions::max_blocking_in_flight`; when that limit
+    /// is zero or full, this method returns a synchronous error and invokes no
+    /// callback. The transport is retained until work and callback quiescence.
+    /// Cancellation and deadlines are cooperative: they commit the runtime
+    /// outcome, request cancellation from Transport, and never forcibly
+    /// interrupt a running `send()` call. A response that arrives after a
+    /// losing cancellation or timeout cannot replace the terminal outcome.
+    ///
+    /// \param transport Shared lifetime lease for the blocking transport.
+    /// \param request Owned request value.
+    /// \param callback Optional typed response callback.
+    /// \param options Optional absolute monotonic deadline.
+    /// \return An operation handle or synchronous InvalidArgument,
+    ///         Backpressure, or Shutdown error.
+    Result<OperationHandle> submit_blocking(
+        std::shared_ptr<Transport> transport,
+        TransportRequest request,
+        TypedCompletionCallback<TransportResponse> callback = {},
+        OperationOptions options = {});
 
     /// Admits one typed operation and queues it asynchronously.
     ///

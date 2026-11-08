@@ -3,7 +3,8 @@
 This describes the Draft implementation in
 [`runtime.hpp`](../../src/bsky_cpp/runtime/runtime.hpp), constrained by
 [ADR-0002](../adr/0002-async-execution-contract.md) and
-[ADR-0004](../adr/0004-runtime-composition.md). It implements non-blocking
+[ADR-0004](../adr/0004-runtime-composition.md). The blocking bridge decision is
+recorded in [ADR-0007](../adr/0007-blocking-transport-bridge.md). It implements non-blocking
 `Result<void>` work, typed `Result<T>` work, and one optional move-only
 terminal callback per operation. It is a runtime primitive, not a high-level
 Client or a network implementation. An admitted operation may also carry an
@@ -42,6 +43,17 @@ that outcome. Cancellation does not preempt executing user work. A completed
 handle observes status and optional failure category, not another payload.
 Dropping a handle does not cancel an operation. Retained completed handles do
 not consume capacity or retain callback captures.
+
+`Runtime::submit_blocking()` is the explicit synchronous-transport bridge. It
+requires a non-zero `RuntimeOptions::max_blocking_in_flight`, owns a shared
+`Transport` lease and request buffers, and runs `Transport::send()` on one
+event-hub `Module` private worker. The admission limit includes queued and
+running blocking calls; a full lane returns `Backpressure` synchronously and
+does not invoke a callback. The ModuleHub owns this worker and its TaskManager;
+the bridge creates no second scheduler, EventBus, or per-request thread.
+Cancellation, deadlines, and shutdown remain cooperative while `send()` is
+running. A remote side effect may therefore be unknown after a timeout or
+cancellation; the bridge does not retry automatically.
 
 `submit_typed<T>()` uses the same operation state, admission, cancellation,
 shutdown, and callback-registration machinery as `submit()`. Its work returns
@@ -93,9 +105,12 @@ runtime registry; it does not accumulate weak entries over time.
 
 ## Execution and lifetime
 
-Managed mode runs the one upstream `ModuleHub::run()` loop on one execution
-thread. Its shared core lease survives destruction of the public runtime.
-There is no second scheduler, event queue, network worker, or cleanup thread.
+Managed mode runs the upstream `ModuleHub::run()` loop on one execution
+thread. When the blocking bridge is enabled, ModuleHub also owns its one
+bounded private worker; this is the only additional execution thread and is
+started/stopped by the same hub lifecycle. Its shared core lease survives
+destruction of the public runtime. There is no second scheduler, event queue,
+or per-request network thread.
 Stopping the hub is deferred until running work and callbacks finish. The
 loop releases its lease after upstream shutdown, avoiding self-join and a
 permanent self-owned cycle.
@@ -243,9 +258,11 @@ after awaiter registration, including when a newly registered deadline is
 earlier than the current wait. Explicit `ModuleHub::request_stop()` continues
 to wake its loop.
 
-Still unimplemented: the blocking-transport bridge, future adapters,
-high-level Client, XRPC, kurlyk, OAuth, WebSocket, and persistence. M1c remains
-partial and Draft pending independent source review;
+Still unimplemented: future adapters, high-level Client, XRPC, kurlyk, OAuth,
+WebSocket, and persistence. The blocking bridge is implemented only for the
+bounded synchronous `Transport::send()` seam; native async transport and the
+broader M1c acceptance gates remain open. M1c remains partial and Draft pending
+independent source review;
 this contract does not claim that all items in the broader async conformance
 plan are delivered. TSan is run as a
 separate Linux job when supported by the toolchain; stress tests and ASan/UBSan

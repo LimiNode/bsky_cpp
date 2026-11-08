@@ -24,10 +24,12 @@ reviewed awaiter deadline and wake-up correction.
 The Draft's exact subset, source domain, package component selection, stop
 policy, lifetime ownership, and compatibility implications are specified in
 [OPERATION_RUNTIME.md](../contracts/OPERATION_RUNTIME.md). This implementation
-uses the upstream blocking `ModuleHub::run()` on its sole leased execution
-thread, rather than `start()`'s internally joinable thread. This allows a
-callback to release the last public owner without self-join; no cleanup worker
-or additional scheduler is introduced. The broader M1c gate remains open.
+uses the upstream blocking `ModuleHub::run()` on its managed hub thread, rather
+than `start()`'s internally joinable thread. This allows a callback to release
+the last public owner without self-join. When the opt-in blocking transport
+bridge is enabled, ModuleHub also owns one bounded private worker for
+synchronous `Transport::send()` calls; it is not a second scheduler or a
+per-request thread. The broader M1c gate remains open.
 
 ## Decision
 

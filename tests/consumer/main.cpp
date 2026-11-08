@@ -139,6 +139,34 @@ int main() {
         !injected_delivered || !injected_runtime.shutdown(std::chrono::seconds(1))) {
         return 1;
     }
+
+    auto bridge_executor = std::make_shared<ConsumerExecutor>();
+    bsky_cpp::runtime::Runtime bridge_runtime(
+        {bsky_cpp::runtime::RuntimeMode::Managed, 4U, {}, bridge_executor, 2U});
+    if (!bridge_runtime.start()) return 1;
+    auto bridge_transport = std::make_shared<bsky_cpp::FakeTransport>(
+        [](const bsky_cpp::TransportRequest&, bsky_cpp::CancellationToken) {
+            return bsky_cpp::TransportResponse::create(200U);
+        });
+    auto bridge_request = bsky_cpp::TransportRequest::create(
+        bsky_cpp::HttpMethod::Get, "https://example.com/bridge");
+    if (!bridge_request) return 1;
+    std::atomic<bool> bridge_delivered{false};
+    auto bridge_operation = bridge_runtime.submit_blocking(
+        bridge_transport,
+        std::move(bridge_request.value()),
+        [&bridge_delivered](bsky_cpp::Result<bsky_cpp::TransportResponse> response) {
+            bridge_delivered = response && response.value().status() == 200U;
+        });
+    if (!bridge_operation ||
+        !bridge_operation.value().wait_for_completion(std::chrono::seconds(1))) {
+        return 1;
+    }
+    bridge_executor->drain();
+    if (!bridge_operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
+        !bridge_delivered || !bridge_runtime.shutdown(std::chrono::seconds(1))) {
+        return 1;
+    }
 #endif
     return 0;
 }

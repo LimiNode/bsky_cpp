@@ -101,7 +101,7 @@ invariant or contract from an earlier one.
 - **Acceptance:** foundation still builds without optional dependencies;
   production runtime target has an explicit event-hub dependency; a
   transport-neutral high-level Client is separate from concrete network
-  adapters; no parallel TaskManager/EventBus/network worker is implemented;
+  adapters; no parallel general-purpose scheduler or EventBus is implemented;
   all ADR-0002 guarantees relevant to the implemented subset are covered by
   deterministic tests. The opt-in `bsky_cpp::runtime` target implements the
   non-blocking void and callback-first typed-result subset documented in
@@ -110,8 +110,11 @@ invariant or contract from an earlier one.
   when an accepted task is dropped. It also implements optional cooperative
   operation deadlines through the existing event-hub `TaskManager`; deadlines
   use `steady_clock`, participate in the first-winner terminal race, and never
-  forcibly interrupt running work. A blocking-transport bridge and future
-  adapters remain unimplemented. The broader acceptance gate is still open.
+  forcibly interrupt running work. `Runtime::submit_blocking()` adds an opt-in
+  bounded synchronous transport bridge using one ModuleHub-owned private
+  worker; it does not create a second scheduler or per-request thread. Future
+  adapters and native asynchronous transport remain unimplemented. The broader
+  acceptance gate is still open.
 - **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
   rate-limit partitions, header conversion, Lexicon datetime integration,
   WebSocket, replay, persistence, and OAuth.

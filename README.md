@@ -23,17 +23,18 @@ client and XRPC implementation remain deferred.
 - [ADR-0002](docs/adr/0002-async-execution-contract.md)
 - [ADR-0005](docs/adr/0005-executor-abstraction.md)
 - [ADR-0006](docs/adr/0006-operation-deadlines.md)
+- [ADR-0007](docs/adr/0007-blocking-transport-bridge.md)
 - [Reference scenarios](docs/reference-scenarios.md)
 
 The canonical documentation language is English. M0c examples remain
 conceptual; the implemented runtime is selected with `BSKY_BUILD_RUNTIME=ON`.
 
-The M1c Draft currently runs non-blocking `Result<void>` work and supports
-callback-first typed `Result<T>` operations, including move-only payloads whose
-`Result<T>` move is `noexcept`, plus an optional shared `IExecutor` callback
-dispatch seam and cooperative per-operation deadlines on `steady_clock`. Its
-precise lifecycle, payload ownership, install-component usage, and remaining
-gates are documented in
+The M1c Draft currently runs non-blocking `Result<void>` work, supports
+callback-first typed `Result<T>` operations, and provides an opt-in bounded
+blocking transport bridge. Move-only payloads whose `Result<T>` move is
+`noexcept`, the shared `IExecutor` callback dispatch seam, cooperative
+`steady_clock` deadlines, and blocking bridge ownership/lifecycle are documented
+in
 [OPERATION_RUNTIME.md](docs/contracts/OPERATION_RUNTIME.md).
 
 ## Includes

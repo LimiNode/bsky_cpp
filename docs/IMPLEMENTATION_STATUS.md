@@ -43,7 +43,10 @@ A document, example, or roadmap item is not evidence of an implementation.
   Optional cooperative operation deadlines are implemented with one delayed
   `TaskManager` task per admitted deadline, including first-winner timeout
   semantics, managed/external dispatch, cancellation cleanup, typed timeout
-  delivery, and callback suppression tests. See the
+  delivery, and callback suppression tests. The opt-in blocking transport bridge
+  is implemented through `Runtime::submit_blocking()` with one bounded
+  ModuleHub-owned private worker, shared typed terminalization, cooperative
+  cancellation/deadlines, and explicit transport lifetime leases. See the
   [runtime contract](contracts/OPERATION_RUNTIME.md) and
   [deadline ADR](adr/0006-operation-deadlines.md) for exact guarantees and
   remaining gates. Full M1c is not yet complete or independently approved.
@@ -61,8 +64,7 @@ A document, example, or roadmap item is not evidence of an implementation.
 ## Contract-only
 
 - High-level client and low-level XRPC API contracts.
-- The blocking-transport bridge and optional future adapter remain
-  contract-only. Typed result operations are implemented only
+- The optional future adapter remains contract-only. Typed result operations are implemented only
   through the callback-first `submit_typed<T>()` subset; this does not imply a
   future adapter or a payload-bearing handle.
 - Identity/discovery, authentication, posts/threads/media, social/profile/chat,
