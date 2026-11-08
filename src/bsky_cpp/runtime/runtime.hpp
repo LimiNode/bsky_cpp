@@ -279,16 +279,21 @@ struct TypedResultSlot {
     /// Terminal typed result retained until callback delivery.
     std::shared_ptr<Result<T>> result;
 
+    /// Replaces the retained result under the slot lock.
+    /// \param value Result payload to retain.
     void store(std::shared_ptr<Result<T>> value) noexcept {
         std::lock_guard<std::mutex> lock(mutex);
         result = std::move(value);
     }
 
+    /// Moves the retained result out under the slot lock.
+    /// \return The retained result, or null when none is available.
     std::shared_ptr<Result<T>> take() noexcept {
         std::lock_guard<std::mutex> lock(mutex);
         return std::move(result);
     }
 
+    /// Drops the retained result under the slot lock.
     void clear() noexcept {
         std::lock_guard<std::mutex> lock(mutex);
         result.reset();
