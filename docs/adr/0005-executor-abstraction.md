@@ -94,6 +94,7 @@ consumer.
 - high-level APIs do not expose event-hub types through the executor seam;
 - executor shutdown and callback quiescence are explicit application
   responsibilities rather than hidden blocking behavior;
-- deadlines, futures, transport bridges, XRPC, kurlyk, and persistence remain
-  outside this change.
+- operation-deadline policy is defined separately by
+  [ADR-0006](0006-operation-deadlines.md); futures, transport bridges, XRPC,
+  kurlyk, and persistence remain outside this change.
 

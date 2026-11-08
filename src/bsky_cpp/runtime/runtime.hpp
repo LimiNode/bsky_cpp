@@ -226,6 +226,7 @@ private:
     std::shared_ptr<detail::OperationState> m_state;
     friend class Runtime;
     friend struct detail::RuntimeCore;
+    friend struct detail::RuntimeTestAccess;
 };
 
 /// Non-blocking operation work accepted by the M1c runtime.
@@ -243,6 +244,23 @@ using TypedOperationWork = MoveOnlyFunction<Result<T>(CancellationToken)>;
 /// `Result<T>` exactly once when a callback was supplied.
 template <typename T>
 using TypedCompletionCallback = MoveOnlyFunction<void(Result<T>)>;
+
+/// Options that affect one admitted operation.
+///
+/// `deadline` is an absolute `std::chrono::steady_clock` time point. It is
+/// scheduled on the runtime's existing event-hub task manager; it is not a
+/// wall-clock time and it never creates a per-operation thread. An already
+/// expired deadline admits a handle whose terminal outcome is `TimedOut`,
+/// without starting work; an optional callback is still dispatched
+/// asynchronously through the selected executor. A deadline is cooperative:
+/// it requests cancellation at the scheduler dispatch point and never
+/// forcibly interrupts a running work function. If timer registration is
+/// rejected after admission, the operation completes with `Shutdown` through
+/// the same terminal path.
+struct OperationOptions {
+    /// Absolute monotonic deadline, or no deadline.
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+};
 
 namespace detail {
 
@@ -263,9 +281,11 @@ struct TypedResultSlot {
 /// processing has one consumer; overlapping/reentrant passes return Conflict.
 /// Object destruction/moving must not race access to that same Runtime object.
 /// Work, callbacks, notifier calls, and capture destructors must be short.
-/// No network I/O, blocking-transport bridge, future adapter, or operation
-/// deadlines are implemented here. Managed timed awaiters rely on the pinned
-/// event-hub-cpp deadline aggregation and registration wake-up correction.
+/// No network I/O, blocking-transport bridge, or future adapter is implemented
+/// here. Operation deadlines use the pinned event-hub-cpp delayed-task API and
+/// request cooperative cancellation; they do not forcibly interrupt running
+/// user work. Managed timed awaiters rely on the pinned event-hub-cpp deadline
+/// aggregation and registration wake-up correction.
 class Runtime {
 public:
     /// Monotonic clock type used for runtime deadlines.
@@ -304,8 +324,8 @@ public:
     Result<std::size_t> process_once();
 
     /// Returns the earliest runtime deadline, if one is currently known.
-    /// For external mode, ready work returns now; task and queued awaiter
-    /// deadlines are aggregated. Call from the external consumer between
+    /// For external mode, ready work returns now; operation, task, and queued
+    /// awaiter deadlines are aggregated. Call from the external consumer between
     /// passes after a successful `start()`; before readiness or after stop it
     /// returns no deadline.
     /// \return Earliest deadline, if any.
@@ -314,9 +334,12 @@ public:
     /// Admits one operation and queues it asynchronously.
     /// \param work Operation body.
     /// \param callback Optional terminal callback.
+    /// \param options Optional absolute monotonic deadline. The trailing
+    ///         parameter preserves the existing `(work, callback)` call shape.
     /// \return An operation handle or a synchronous admission error.
     Result<OperationHandle> submit(OperationWork work,
-                                   CompletionCallback callback = {});
+                                   CompletionCallback callback = {},
+                                   OperationOptions options = {});
 
     /// Admits one typed operation and queues it asynchronously.
     ///
@@ -332,11 +355,14 @@ public:
     /// \tparam T Successful value type whose `Result<T>` move is `noexcept`.
     /// \param work Typed operation body.
     /// \param callback Optional typed terminal callback.
+    /// \param options Optional absolute monotonic deadline. The trailing
+    ///         parameter preserves the existing `(work, callback)` call shape.
     /// \return An operation handle or a synchronous admission error.
     template <typename T>
     Result<OperationHandle> submit_typed(
         TypedOperationWork<T> work,
-        TypedCompletionCallback<T> callback = {}) {
+        TypedCompletionCallback<T> callback = {},
+        OperationOptions options = {}) {
         static_assert(!std::is_void<T>::value,
                       "Use Runtime::submit for Result<void> operations.");
         static_assert(
@@ -386,7 +412,8 @@ public:
             };
         }
 
-        return submit(std::move(erased_work), std::move(erased_callback));
+        return submit(std::move(erased_work), std::move(erased_callback),
+                      std::move(options));
     }
 
     /// Closes admission, suppresses queued callbacks, and records Shutdown for

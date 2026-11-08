@@ -2,6 +2,7 @@
 #include "bsky_cpp/runtime/detail/runtime_test_access.hpp"
 
 #include <event_hub/module_hub.hpp>
+#include <event_hub/task.hpp>
 
 #include <condition_variable>
 #include <cstdint>
@@ -31,6 +32,7 @@ struct OperationState {
     bool callback_done = false;
     bool callback_dispatch_pending = false;
     bool stop_handled = false;
+    event_hub::TaskId timeout_task_id = 0;
 };
 
 struct CallbackDispatchGuard {
@@ -244,7 +246,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         return deadline;
     }
 
-    Result<OperationHandle> submit(OperationWork work, CompletionCallback callback) {
+    Result<OperationHandle> submit(OperationWork work,
+                                   CompletionCallback callback,
+                                   OperationOptions operation_options) {
         if (!work) return Result<OperationHandle>::failure(Error(
             ErrorCategory::InvalidArgument, "operation work is empty", "runtime.submit"));
 
@@ -254,6 +258,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         state->callback = std::move(callback);
         state->callback_done = !state->callback;
         bool queued = false;
+        bool expired = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!accepting) return Result<OperationHandle>::failure(Error(
@@ -265,8 +270,59 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             // Register before leaving the admission boundary so stop observes
             // the operation while its upstream task is being submitted.
             operations.emplace(state.get(), state);
+            expired = operation_options.deadline &&
+                      *operation_options.deadline <= std::chrono::steady_clock::now();
             if (submit_admission_hook) submit_admission_hook();
         }
+
+        if (expired) {
+            timeout(state);
+            abandon_work(state);
+            return Result<OperationHandle>::success(OperationHandle(state));
+        }
+
+        if (operation_options.deadline) {
+            event_hub::TaskId timeout_id = 0;
+            try {
+                timeout_id = module->tasks().post_at(
+                    *operation_options.deadline,
+                    [weak = std::weak_ptr<OperationState>(state)] {
+                        if (auto live = weak.lock()) live->core->timeout(live);
+                    },
+                    event_hub::TaskOptions{event_hub::TaskPriority::high});
+            } catch (...) {
+                timeout_id = 0;
+            }
+
+            if (timeout_id == 0) {
+                try {
+                    complete(state, Result<void>::failure(Error(
+                        ErrorCategory::Shutdown,
+                        "deadline registration was rejected",
+                        "runtime.deadline")));
+                } catch (...) {
+                    emergency_complete(state, ErrorCategory::Shutdown);
+                }
+                abandon_work(state);
+                return Result<OperationHandle>::success(OperationHandle(state));
+            }
+
+            bool cancel_timeout = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (state->completed) {
+                    cancel_timeout = true;
+                } else {
+                    state->timeout_task_id = timeout_id;
+                }
+            }
+            if (cancel_timeout) {
+                (void)module->tasks().cancel(timeout_id);
+                abandon_work(state);
+                return Result<OperationHandle>::success(OperationHandle(state));
+            }
+        }
+
         try {
             queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
                 if (auto live = weak.lock()) live->core->execute(live);
@@ -285,6 +341,27 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             abandon_work(state);
         }
         return Result<OperationHandle>::success(OperationHandle(state));
+    }
+
+    void timeout(const std::shared_ptr<OperationState>& state) noexcept {
+        // The cancellation request is part of the same first-winner critical
+        // section as the terminal transition.  A timeout that loses to a
+        // completion must not make an already successful operation appear
+        // cancelled to a token retained by user work.
+        try {
+            complete(state,
+                     Result<void>::failure(Error(
+                         ErrorCategory::TimedOut,
+                         "operation deadline expired",
+                         "runtime.deadline")),
+                     true);
+        } catch (...) {
+            // Error construction itself can allocate.  The timer callback is
+            // noexcept at the TaskManager boundary, so fall back to the
+            // allocation-free emergency terminal path instead of terminating
+            // the hub loop.
+            emergency_complete(state, ErrorCategory::TimedOut, true);
+        }
     }
 
     void execute(const std::shared_ptr<OperationState>& state) {
@@ -320,16 +397,24 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         retire(state);
     }
 
-    void complete(const std::shared_ptr<OperationState>& state, Result<void> result) {
+    void complete(const std::shared_ptr<OperationState>& state,
+                  Result<void> result,
+                  bool request_cancellation = false) {
         ErrorCategory emergency_category = result
                                                ? ErrorCategory::Internal
                                                : result.error().category();
         bool dispatch = false;
+        event_hub::TaskId timeout_id = 0;
         try {
             if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (state->completed) return;
+                if (request_cancellation) {
+                    state->cancellation.request_cancellation();
+                }
+                timeout_id = state->timeout_task_id;
+                state->timeout_task_id = 0;
                 state->error = result ? std::nullopt
                                       : std::optional<ErrorCategory>(result.error().category());
                 state->payload.emplace(std::move(result));
@@ -346,8 +431,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 retire(state);
             }
         } catch (...) {
-            emergency_complete(state, emergency_category);
+            emergency_complete(state, emergency_category, request_cancellation);
         }
+        if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
         if (!dispatch) return;
 
         try {
@@ -458,11 +544,18 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     }
 
     void emergency_complete(const std::shared_ptr<OperationState>& state,
-                            ErrorCategory category) noexcept {
+                            ErrorCategory category,
+                            bool request_cancellation = false) noexcept {
         CompletionCallback callback;
+        event_hub::TaskId timeout_id = 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (state->completed) return;
+            if (request_cancellation) {
+                state->cancellation.request_cancellation();
+            }
+            timeout_id = state->timeout_task_id;
+            state->timeout_task_id = 0;
             state->callback_closed = true;
             state->callback_cleanup = true;
             state->error = category;
@@ -471,6 +564,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             callback = std::move(state->callback);
             retire(state);
         }
+        if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
         ExecutionScope scope(this);
         callback.reset();
         std::lock_guard<std::mutex> lock(mutex);
@@ -717,6 +811,10 @@ void RuntimeTestAccess::inject_fault(Runtime& runtime, RuntimeFaultPoint point) 
     runtime.m_core->fault_mask.fetch_or(bit, std::memory_order_release);
 }
 
+void RuntimeTestAccess::force_timeout(const OperationHandle& operation) noexcept {
+    if (operation.m_state) operation.m_state->core->timeout(operation.m_state);
+}
+
 std::size_t RuntimeTestAccess::registered_operations(Runtime& runtime) {
     std::lock_guard<std::mutex> lock(runtime.m_core->mutex);
     return runtime.m_core->operations.size();
@@ -802,9 +900,12 @@ std::optional<Runtime::TimePoint> Runtime::next_deadline() {
     return m_core ? m_core->next_deadline() : std::nullopt;
 }
 
-Result<OperationHandle> Runtime::submit(OperationWork work, CompletionCallback callback) {
+Result<OperationHandle> Runtime::submit(OperationWork work,
+                                        CompletionCallback callback,
+                                        OperationOptions options) {
     auto core = m_core;
-    return core ? core->submit(std::move(work), std::move(callback))
+    return core ? core->submit(std::move(work), std::move(callback),
+                               std::move(options))
                 : Result<OperationHandle>::failure(Error(
                       ErrorCategory::Shutdown, "empty runtime", "runtime.submit"));
 }
