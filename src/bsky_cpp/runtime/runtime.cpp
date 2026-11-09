@@ -486,9 +486,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             if (outcome_ready) complete(state, std::move(outcome));
         }
         work.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->work_done = true;
-        retire(state);
+        bool request_hub_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->work_done = true;
+            request_hub_stop = retire(state);
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void complete(const std::shared_ptr<OperationState>& state,
@@ -498,6 +502,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                                                ? ErrorCategory::Internal
                                                : result.error().category();
         bool dispatch = false;
+        bool request_hub_stop = false;
         event_hub::TaskId timeout_id = 0;
         try {
             if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
@@ -522,12 +527,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                     state->payload.reset();
                     state->callback_done = true;
                 }
-                retire(state);
+                request_hub_stop = retire(state);
             }
         } catch (...) {
             emergency_complete(state, emergency_category, request_cancellation);
         }
         if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
+        if (request_hub_stop) hub.request_stop();
         if (!dispatch) return;
 
         try {
@@ -559,6 +565,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         CompletionCallback callback;
         std::optional<Result<void>> result;
         bool missing_payload = false;
+        bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (state->callback_closed || state->callback_done || state->callback_started) return;
@@ -571,11 +578,12 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             } else {
                 state->callback_started = false;
                 state->callback_done = true;
-                retire(state);
+                request_hub_stop = retire(state);
                 missing_payload = true;
             }
         }
         if (missing_payload) {
+            if (request_hub_stop) hub.request_stop();
             return;
         }
         ExecutionScope scope(this);
@@ -585,12 +593,14 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_started = false;
             state->callback_done = true;
-            retire(state);
+            request_hub_stop = retire(state);
         }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void close_callback(const std::shared_ptr<OperationState>& state) {
         CompletionCallback callback;
+        bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_closed = true;
@@ -606,8 +616,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_cleanup = false;
             state->callback_done = true;
-            retire(state);
+            request_hub_stop = retire(state);
         }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void abandon_work(const std::shared_ptr<OperationState>& state) {
@@ -620,9 +631,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         ExecutionScope scope(this);
         work.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->work_done = true;
-        retire(state);
+        bool request_hub_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->work_done = true;
+            request_hub_stop = retire(state);
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void cancel(const std::shared_ptr<OperationState>& state, ErrorCategory category) {
@@ -641,6 +656,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                             ErrorCategory category,
                             bool request_cancellation = false) noexcept {
         CompletionCallback callback;
+        bool request_hub_stop = false;
         event_hub::TaskId timeout_id = 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -656,15 +672,19 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             state->payload.reset();
             state->completed = true;
             callback = std::move(state->callback);
-            retire(state);
+            request_hub_stop = retire(state);
         }
         if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
+        if (request_hub_stop) hub.request_stop();
         ExecutionScope scope(this);
         callback.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->callback_cleanup = false;
-        state->callback_done = true;
-        retire(state);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_cleanup = false;
+            state->callback_done = true;
+            request_hub_stop = retire(state);
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void stop() noexcept {
@@ -809,7 +829,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
     // The mutex is held by every caller. Erasure releases capacity and keeps
     // the registry bounded even when observers retain completed handles.
-    void retire(const std::shared_ptr<OperationState>& state) {
+    // The returned flag is consumed only after the mutex is released; no
+    // event-hub or notifier call may run in this critical section.
+    bool retire(const std::shared_ptr<OperationState>& state) {
         bool request_hub_stop = false;
         if (state->completed && state->work_done && state->callback_done) {
             const auto erased = operations.erase(state.get());
@@ -819,7 +841,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             request_hub_stop = stopping && operations.empty() && ready;
         }
         condition.notify_all();
-        if (request_hub_stop) hub.request_stop();
+        return request_hub_stop;
     }
 
     RuntimeOptions options;

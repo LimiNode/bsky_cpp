@@ -114,6 +114,10 @@ or per-request network thread.
 Stopping the hub is deferred until running work and callbacks finish. The
 loop releases its lease after upstream shutdown, avoiding self-join and a
 permanent self-owned cycle.
+Final retirement records a managed-loop wake-up under the runtime state lock
+and performs `ModuleHub::request_stop()` only after releasing that lock; event-
+hub, notifier, and private-worker wake-up code therefore never runs inside the
+runtime critical section.
 
 External mode has one consumer calling `process_once()` and `next_deadline()`.
 These calls are permitted only after external `start()` succeeds. Calls before

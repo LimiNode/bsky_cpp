@@ -49,6 +49,12 @@ exception becomes `Internal`; callback exceptions remain contained by the
 existing runtime. Executor rejection or accepted-task destruction suppresses
 delivery without changing the already committed outcome.
 
+When the final admitted operation retires during shutdown, the runtime records
+the need for a hub wake-up while holding its state mutex, releases that mutex,
+and only then calls `ModuleHub::request_stop()`. This keeps notifier and private
+worker wake-up code outside the runtime critical section and preserves the
+existing external-finalization lock order.
+
 The bridge is opt-in. `max_blocking_in_flight == 0` keeps the runtime's existing
 non-blocking composition and creates no private worker. The current pre-1.0
 compatibility promise is source compatibility for existing `RuntimeOptions`
