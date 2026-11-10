@@ -1,6 +1,6 @@
 # ADR-0004: Runtime composition and dependency ownership
 
-- **Status:** Accepted direction; a partial M1c Draft implementation is
+- **Status:** Accepted direction; a merged partial M1c implementation is
   available behind the opt-in `BSKY_BUILD_RUNTIME` CMake option.
 - **Date:** 2026-10-31
 - **Depends on:** ADR-0002, ADR-0003, and [`DEPENDENCY_REUSE_AUDIT.md`](../research/DEPENDENCY_REUSE_AUDIT.md)
@@ -21,7 +21,7 @@ event-hub composition are implementation evidence for the operation-runtime
 portion of this decision. The pinned event-hub snapshot now includes the
 reviewed awaiter deadline and wake-up correction.
 
-The Draft's exact subset, source domain, package component selection, stop
+The implementation's exact subset, source domain, package component selection, stop
 policy, lifetime ownership, and compatibility implications are specified in
 [OPERATION_RUNTIME.md](../contracts/OPERATION_RUNTIME.md). This implementation
 uses the upstream blocking `ModuleHub::run()` on its managed hub thread, rather

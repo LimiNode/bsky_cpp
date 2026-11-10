@@ -1,6 +1,6 @@
 # ADR-0006: Cooperative operation deadlines
 
-- **Status:** Draft M1c implementation
+- **Status:** Accepted for the merged M1c runtime subset; broader M1c remains partial
 - **Date:** 2026-11-07
 - **Depends on:** [ADR-0002](0002-async-execution-contract.md),
   [ADR-0004](0004-runtime-composition.md), and
