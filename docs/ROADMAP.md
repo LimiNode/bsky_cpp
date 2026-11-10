@@ -134,6 +134,22 @@ invariant or contract from an earlier one.
   pinned, non-duplicated dependencies and explicit transitive `find_dependency()`
   requirements.
 
+The implementation is intentionally split into small reviewable slices:
+
+- **M1d0 — integration contract:** inspect the pinned kurlyk API and freeze
+  completion, cancellation, ownership, error, dependency, and test boundaries.
+- **M1d1 — native async transport:** add one adapter with a deterministic fake
+  and one end-to-end request. It forwards native completion into the existing
+  runtime; it does not call the blocking bridge, add a second scheduler, or
+  create per-request threads.
+- **M1d2 — basic XRPC:** add typed query/procedure encoding and response
+  decoding with bounded buffers and protocol fixtures.
+- **M1d3 — policy and security:** add transport/HTTP/XRPC error mapping,
+  retry and idempotency rules, rate-limit accounting, endpoint/redirect/auth
+  policy, and secret-redaction tests.
+- **M1 closeout:** add DID/Handle resolution, endpoint discovery, and the
+  first public read scenario with wire fixtures and installed-consumer checks.
+
 ### M4 advanced infrastructure gates
 
 WebSocket reconnect, Jetstream replay/checkpoints/gaps, persistent recovery,
