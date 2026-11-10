@@ -87,11 +87,15 @@ invariant or contract from an earlier one.
 - **Deferred:** async operation admission/execution (M1c), XRPC encoding and
   protocol mapping (M1d), identity resolution, and network adapters.
 
-### M1c — Operation runtime (partial Draft)
+### M1c — Operation runtime (partial, merged subset)
 
 - **Prerequisites:** M1b, ADR-0002, and ADR-0004. The pinned event-hub
   snapshot includes the reviewed deadline-and-wake-up correction, so managed
   timed awaiters are covered for this runtime composition.
+- **Review status:** The implemented subset, including the bounded blocking
+  transport bridge, is merged and independently reviewed. The broader M1c
+  gate remains partial by design; native async transport and the optional
+  future adapter are deferred to M1d.
 - **Scope:** event-hub-cpp-backed managed and external execution composition,
   bounded operation admission, exactly-one terminal outcome, cancellation and
   completion races, typed `Result<T>` callback delivery, callback

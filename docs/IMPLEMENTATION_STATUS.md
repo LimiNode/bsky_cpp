@@ -27,7 +27,8 @@ A document, example, or roadmap item is not evidence of an implementation.
 
 ## Partial
 
-- Draft M1c non-blocking void and typed-result operation runtime is implemented
+- M1c's merged runtime subset (PR #15, merge commit
+  `85d456b0e26f9c3b3a4822d6e0da8ba005e212ac`) is implemented
   and tested in
   [`runtime.cpp`](../src/bsky_cpp/runtime/runtime.cpp) and
   [`tests/runtime.cpp`](../tests/runtime.cpp). Admission/stop serialization,
@@ -49,7 +50,36 @@ A document, example, or roadmap item is not evidence of an implementation.
   cancellation/deadlines, and explicit transport lifetime leases. See the
   [runtime contract](contracts/OPERATION_RUNTIME.md) and
   [deadline ADR](adr/0006-operation-deadlines.md) for exact guarantees and
-  remaining gates. Full M1c is not yet complete or independently approved.
+  remaining gates. This subset has passed independent source review and the
+  post-merge workflow [42820527726](https://github.com/LimiNode/bsky_cpp/actions/runs/42820527726)
+  (17/17 jobs). Full M1c remains partial: the optional future adapter and the
+  native asynchronous transport/client acceptance gates are intentionally
+  deferred to M1d.
+
+### M1c conformance audit (2026-11-10)
+
+The following matrix records the post-merge audit against ADR-0002,
+ADR-0004--ADR-0007, and `contracts/OPERATION_RUNTIME.md`.
+
+| Invariant | Classification | Evidence |
+| --- | --- | --- |
+| Managed/external composition and lifecycle handoff | Implemented and test-confirmed | `tests/runtime.cpp` lifecycle, external-consumer, deadline, and self-destruction cases; runtime CI matrix |
+| Admission validation, bounded capacity, and backpressure | Implemented and test-confirmed | `admission_capacity_and_terminal_races()`, blocking bridge capacity cases |
+| Exactly one terminal outcome and first-winner cancellation/completion | Implemented and test-confirmed | cancellation, typed terminal-race, deadline, and blocking bridge race cases |
+| Callback registration closure, suppression, capture release, and quiescence | Implemented and test-confirmed | `close_and_move_only_captures()`, executor lifecycle, typed callback lifetime, shutdown cases |
+| Move-only typed results and callbacks | Implemented and test-confirmed | `typed_operations()`, `typed_callback_lifetime()`, compile-time payload checks |
+| Executor ownership, rejection, and accepted-but-dropped tasks | Implemented and test-confirmed | `injected_executor_lifecycle()` and callback rejection tests |
+| Shutdown timeout, repeated shutdown, exception containment, and lifetime leases | Implemented and test-confirmed | shutdown/lifetime/fault tests plus TSan and sanitizer jobs |
+| Cooperative `steady_clock` deadlines | Implemented and test-confirmed | `operation_deadline_semantics()` in managed and external modes |
+| Bounded synchronous transport bridge and private-worker wake-up ordering | Implemented and test-confirmed | `blocking_transport_bridge_semantics()`; PR #15 gate-controlled regressions |
+| Foundation/package isolation and installed runtime consumers | Implemented and test-confirmed | runtime-off/on CMake jobs, installed consumers, header/Doxygen checks |
+| Optional `std::future` adapter | Consciously deferred/optional | ADR-0002 and `OPERATION_RUNTIME.md`; no future adapter is required by M1c |
+| Native async transport, kurlyk/XRPC mapping, and high-level Client | Consciously deferred/optional | ROADMAP M1d; outside the merged runtime subset |
+
+No M1c invariant was found that is implemented but lacks a required
+regression, and no unimplemented item is a blocker for the documented merged
+subset. The broader milestone remains partial until the explicitly deferred
+M1d boundaries are delivered and reviewed.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
   accepted documentation contract. Managed timed awaiter guarantees in the
