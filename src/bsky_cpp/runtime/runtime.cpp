@@ -32,6 +32,7 @@ struct OperationState {
     bool callback_done = false;
     bool callback_dispatch_pending = false;
     bool stop_handled = false;
+    bool blocking = false;
     event_hub::TaskId timeout_task_id = 0;
 };
 
@@ -66,6 +67,17 @@ private:
     RuntimeCore& m_core;
 };
 
+// Blocking transport work uses the upstream Module private-thread mode. The
+// ModuleHub still owns lifecycle and scheduling; this lane only keeps a
+// blocking send() off the hub's event-loop thread.
+class BlockingTransportModule final : public event_hub::Module {
+public:
+    explicit BlockingTransportModule(event_hub::EventBus& bus)
+        : Module(bus,
+                 event_hub::ModuleOptions{
+                     event_hub::ModuleExecutionMode::private_thread, 1U}) {}
+};
+
 class EventHubExecutor final : public IExecutor {
 public:
     explicit EventHubExecutor(RuntimeCore& core) noexcept : m_core(core) {}
@@ -79,6 +91,10 @@ private:
 struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     explicit RuntimeCore(RuntimeOptions value) : options(std::move(value)) {
         module = &hub.emplace_module<RuntimeModule>(*this);
+        if (options.max_blocking_in_flight != 0U) {
+            blocking_module =
+                &hub.emplace_module<BlockingTransportModule>();
+        }
         executor = options.executor
                        ? std::move(options.executor)
                        : std::make_shared<EventHubExecutor>(*this);
@@ -248,7 +264,8 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
     Result<OperationHandle> submit(OperationWork work,
                                    CompletionCallback callback,
-                                   OperationOptions operation_options) {
+                                   OperationOptions operation_options,
+                                   bool blocking = false) {
         if (!work) return Result<OperationHandle>::failure(Error(
             ErrorCategory::InvalidArgument, "operation work is empty", "runtime.submit"));
 
@@ -257,6 +274,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         state->work = std::move(work);
         state->callback = std::move(callback);
         state->callback_done = !state->callback;
+        state->blocking = blocking;
         bool queued = false;
         bool expired = false;
         {
@@ -267,9 +285,18 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 return Result<OperationHandle>::failure(Error(
                     ErrorCategory::Backpressure, "operation admission limit reached", "runtime.submit"));
             }
+            if (blocking &&
+                (blocking_module == nullptr ||
+                 blocking_operations >= options.max_blocking_in_flight)) {
+                return Result<OperationHandle>::failure(Error(
+                    ErrorCategory::Backpressure,
+                    "blocking transport admission limit reached",
+                    "runtime.submit_blocking"));
+            }
             // Register before leaving the admission boundary so stop observes
             // the operation while its upstream task is being submitted.
             operations.emplace(state.get(), state);
+            if (blocking) ++blocking_operations;
             expired = operation_options.deadline &&
                       *operation_options.deadline <= std::chrono::steady_clock::now();
             if (submit_admission_hook) submit_admission_hook();
@@ -324,9 +351,14 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
 
         try {
-            queued = module->tasks().post([weak = std::weak_ptr<OperationState>(state)] {
+            auto* work_module =
+                blocking ? static_cast<event_hub::Module*>(blocking_module)
+                         : static_cast<event_hub::Module*>(module);
+            queued = work_module != nullptr &&
+                     work_module->tasks().post(
+                [weak = std::weak_ptr<OperationState>(state)] {
                 if (auto live = weak.lock()) live->core->execute(live);
-            }) != 0U;
+                }) != 0U;
         } catch (...) {
             // Once registered, queue rejection is a terminal failure.
         }
@@ -341,6 +373,68 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             abandon_work(state);
         }
         return Result<OperationHandle>::success(OperationHandle(state));
+    }
+
+    Result<OperationHandle> submit_blocking(
+        std::shared_ptr<Transport> transport,
+        TransportRequest request,
+        TypedCompletionCallback<TransportResponse> callback,
+        OperationOptions operation_options) {
+        if (!transport) {
+            return Result<OperationHandle>::failure(Error(
+                ErrorCategory::InvalidArgument,
+                "blocking transport is empty",
+                "runtime.submit_blocking"));
+        }
+        if (options.max_blocking_in_flight == 0U || blocking_module == nullptr) {
+            return Result<OperationHandle>::failure(Error(
+                ErrorCategory::InvalidArgument,
+                "blocking transport bridge is disabled",
+                "runtime.submit_blocking"));
+        }
+
+        static_assert(
+            std::is_nothrow_move_constructible<Result<TransportResponse>>::value,
+            "blocking transport requires a nothrow-move response result");
+        auto slot = std::make_shared<detail::TypedResultSlot<TransportResponse>>();
+        OperationWork work = [transport = std::move(transport),
+                              request = std::move(request), slot](
+                                 CancellationToken token) mutable {
+            auto response = transport->send(request, token);
+            auto produced = std::make_shared<Result<TransportResponse>>(
+                std::move(response));
+            const bool success = static_cast<bool>(*produced);
+            std::optional<Error> error;
+            if (!success) error.emplace(produced->error());
+            slot->store(std::move(produced));
+            if (success) return Result<void>::success();
+            return Result<void>::failure(std::move(*error));
+        };
+
+        CompletionCallback erased_callback;
+        if (callback) {
+            erased_callback = [callback = std::move(callback), slot](
+                                  Result<void> terminal) mutable {
+                if (!terminal) {
+                    slot->clear();
+                    callback(Result<TransportResponse>::failure(
+                        Error(terminal.error())));
+                    return;
+                }
+                auto produced = slot->take();
+                if (produced) {
+                    callback(std::move(*produced));
+                    return;
+                }
+                callback(Result<TransportResponse>::failure(Error(
+                    ErrorCategory::Internal,
+                    "blocking transport result was not produced",
+                    "runtime.submit_blocking")));
+            };
+        }
+
+        return submit(std::move(work), std::move(erased_callback),
+                      std::move(operation_options), true);
     }
 
     void timeout(const std::shared_ptr<OperationState>& state) noexcept {
@@ -392,9 +486,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             if (outcome_ready) complete(state, std::move(outcome));
         }
         work.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->work_done = true;
-        retire(state);
+        bool request_hub_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->work_done = true;
+            request_hub_stop = retire(state);
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void complete(const std::shared_ptr<OperationState>& state,
@@ -404,6 +502,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                                                ? ErrorCategory::Internal
                                                : result.error().category();
         bool dispatch = false;
+        bool request_hub_stop = false;
         event_hub::TaskId timeout_id = 0;
         try {
             if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
@@ -428,12 +527,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                     state->payload.reset();
                     state->callback_done = true;
                 }
-                retire(state);
+                request_hub_stop = retire(state);
             }
         } catch (...) {
             emergency_complete(state, emergency_category, request_cancellation);
         }
         if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
+        if (request_hub_stop) hub.request_stop();
         if (!dispatch) return;
 
         try {
@@ -465,6 +565,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         CompletionCallback callback;
         std::optional<Result<void>> result;
         bool missing_payload = false;
+        bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (state->callback_closed || state->callback_done || state->callback_started) return;
@@ -477,11 +578,12 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             } else {
                 state->callback_started = false;
                 state->callback_done = true;
-                retire(state);
+                request_hub_stop = retire(state);
                 missing_payload = true;
             }
         }
         if (missing_payload) {
+            if (request_hub_stop) hub.request_stop();
             return;
         }
         ExecutionScope scope(this);
@@ -491,12 +593,14 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_started = false;
             state->callback_done = true;
-            retire(state);
+            request_hub_stop = retire(state);
         }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void close_callback(const std::shared_ptr<OperationState>& state) {
         CompletionCallback callback;
+        bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_closed = true;
@@ -512,8 +616,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             std::lock_guard<std::mutex> lock(mutex);
             state->callback_cleanup = false;
             state->callback_done = true;
-            retire(state);
+            request_hub_stop = retire(state);
         }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void abandon_work(const std::shared_ptr<OperationState>& state) {
@@ -526,9 +631,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         ExecutionScope scope(this);
         work.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->work_done = true;
-        retire(state);
+        bool request_hub_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->work_done = true;
+            request_hub_stop = retire(state);
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void cancel(const std::shared_ptr<OperationState>& state, ErrorCategory category) {
@@ -547,6 +656,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                             ErrorCategory category,
                             bool request_cancellation = false) noexcept {
         CompletionCallback callback;
+        bool request_hub_stop = false;
         event_hub::TaskId timeout_id = 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -562,15 +672,19 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             state->payload.reset();
             state->completed = true;
             callback = std::move(state->callback);
-            retire(state);
+            request_hub_stop = retire(state);
         }
         if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
+        if (request_hub_stop) hub.request_stop();
         ExecutionScope scope(this);
         callback.reset();
-        std::lock_guard<std::mutex> lock(mutex);
-        state->callback_cleanup = false;
-        state->callback_done = true;
-        retire(state);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->callback_cleanup = false;
+            state->callback_done = true;
+            request_hub_stop = retire(state);
+        }
+        if (request_hub_stop) hub.request_stop();
     }
 
     void stop() noexcept {
@@ -715,20 +829,32 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
     // The mutex is held by every caller. Erasure releases capacity and keeps
     // the registry bounded even when observers retain completed handles.
-    void retire(const std::shared_ptr<OperationState>& state) {
-        if (state->completed && state->work_done && state->callback_done) operations.erase(state.get());
+    // The returned flag is consumed only after the mutex is released; no
+    // event-hub or notifier call may run in this critical section.
+    bool retire(const std::shared_ptr<OperationState>& state) {
+        bool request_hub_stop = false;
+        if (state->completed && state->work_done && state->callback_done) {
+            const auto erased = operations.erase(state.get());
+            if (erased != 0U && state->blocking && blocking_operations != 0U) {
+                --blocking_operations;
+            }
+            request_hub_stop = stopping && operations.empty() && ready;
+        }
         condition.notify_all();
+        return request_hub_stop;
     }
 
     RuntimeOptions options;
     event_hub::ModuleHub hub;
     RuntimeModule* module = nullptr;
+    BlockingTransportModule* blocking_module = nullptr;
     std::shared_ptr<IExecutor> executor;
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::mutex lifecycle_mutex;
     std::mutex consumer_mutex;
     std::unordered_map<OperationState*, std::shared_ptr<OperationState>> operations;
+    std::size_t blocking_operations = 0U;
     bool started = false;
     bool starting = false;
     bool ready = false;
@@ -780,6 +906,12 @@ std::size_t RuntimeModule::on_process() { m_core.loop_pass(); return 0U; }
 
 void RuntimeTestAccess::close_executor(Runtime& runtime) {
     runtime.m_core->module->tasks().close();
+}
+
+void RuntimeTestAccess::close_blocking_worker(Runtime& runtime) {
+    if (runtime.m_core->blocking_module != nullptr) {
+        runtime.m_core->blocking_module->tasks().close();
+    }
 }
 
 void RuntimeTestAccess::set_admission_hook(Runtime& runtime,
@@ -908,6 +1040,22 @@ Result<OperationHandle> Runtime::submit(OperationWork work,
                                std::move(options))
                 : Result<OperationHandle>::failure(Error(
                       ErrorCategory::Shutdown, "empty runtime", "runtime.submit"));
+}
+
+Result<OperationHandle> Runtime::submit_blocking(
+    std::shared_ptr<Transport> transport,
+    TransportRequest request,
+    TypedCompletionCallback<TransportResponse> callback,
+    OperationOptions options) {
+    auto core = m_core;
+    return core ? core->submit_blocking(std::move(transport),
+                                        std::move(request),
+                                        std::move(callback),
+                                        std::move(options))
+                : Result<OperationHandle>::failure(Error(
+                      ErrorCategory::Shutdown,
+                      "empty runtime",
+                      "runtime.submit_blocking"));
 }
 
 void Runtime::request_stop() noexcept {

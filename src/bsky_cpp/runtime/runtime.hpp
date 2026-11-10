@@ -5,6 +5,7 @@
 #include "bsky_cpp/core/bsky_error.hpp"
 #include "bsky_cpp/core/cancellation.hpp"
 #include "bsky_cpp/core/result.hpp"
+#include "bsky_cpp/transport/transport.hpp"
 
 #include <event_hub/notifier.hpp>
 
@@ -152,6 +153,10 @@ struct RuntimeOptions {
     /// callbacks through the existing ModuleHub task manager; no second
     /// scheduler is created. The shared pointer is an explicit lifetime lease.
     std::shared_ptr<IExecutor> executor;
+    /// Maximum number of admitted blocking-transport jobs, including queued
+    /// and running work. Zero leaves the blocking bridge disabled and avoids
+    /// creating its bounded private worker.
+    std::size_t max_blocking_in_flight = 0U;
 };
 
 class OperationHandle;
@@ -267,8 +272,32 @@ namespace detail {
 /// Shared typed terminal payload slot. It owns no user work or callback.
 template <typename T>
 struct TypedResultSlot {
+    /// Synchronizes producer completion with callback delivery. A running
+    /// operation may finish its work after cancellation/timeout has already
+    /// delivered the terminal callback.
+    mutable std::mutex mutex;
     /// Terminal typed result retained until callback delivery.
     std::shared_ptr<Result<T>> result;
+
+    /// Replaces the retained result under the slot lock.
+    /// \param value Result payload to retain.
+    void store(std::shared_ptr<Result<T>> value) noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        result = std::move(value);
+    }
+
+    /// Moves the retained result out under the slot lock.
+    /// \return The retained result, or null when none is available.
+    std::shared_ptr<Result<T>> take() noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        return std::move(result);
+    }
+
+    /// Drops the retained result under the slot lock.
+    void clear() noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        result.reset();
+    }
 };
 
 }  // namespace detail
@@ -281,8 +310,9 @@ struct TypedResultSlot {
 /// processing has one consumer; overlapping/reentrant passes return Conflict.
 /// Object destruction/moving must not race access to that same Runtime object.
 /// Work, callbacks, notifier calls, and capture destructors must be short.
-/// No network I/O, blocking-transport bridge, or future adapter is implemented
-/// here. Operation deadlines use the pinned event-hub-cpp delayed-task API and
+/// Blocking transport work, when explicitly enabled, runs on one bounded
+/// event-hub private worker and never on the hub loop. No future adapter is
+/// implemented here. Operation deadlines use the pinned event-hub-cpp delayed-task API and
 /// request cooperative cancellation; they do not forcibly interrupt running
 /// user work. Managed timed awaiters rely on the pinned event-hub-cpp deadline
 /// aggregation and registration wake-up correction.
@@ -341,6 +371,30 @@ public:
                                    CompletionCallback callback = {},
                                    OperationOptions options = {});
 
+    /// Executes one synchronous Transport::send() call on the bounded
+    /// blocking bridge lane and delivers its owned response asynchronously.
+    ///
+    /// The bridge uses one event-hub private worker for this Runtime. Admission
+    /// is bounded by `RuntimeOptions::max_blocking_in_flight`; when that limit
+    /// is zero or full, this method returns a synchronous error and invokes no
+    /// callback. The transport is retained until work and callback quiescence.
+    /// Cancellation and deadlines are cooperative: they commit the runtime
+    /// outcome, request cancellation from Transport, and never forcibly
+    /// interrupt a running `send()` call. A response that arrives after a
+    /// losing cancellation or timeout cannot replace the terminal outcome.
+    ///
+    /// \param transport Shared lifetime lease for the blocking transport.
+    /// \param request Owned request value.
+    /// \param callback Optional typed response callback.
+    /// \param options Optional absolute monotonic deadline.
+    /// \return An operation handle or synchronous InvalidArgument,
+    ///         Backpressure, or Shutdown error.
+    Result<OperationHandle> submit_blocking(
+        std::shared_ptr<Transport> transport,
+        TransportRequest request,
+        TypedCompletionCallback<TransportResponse> callback = {},
+        OperationOptions options = {});
+
     /// Admits one typed operation and queues it asynchronously.
     ///
     /// The typed payload is moved into the callback channel. It is not
@@ -380,11 +434,15 @@ public:
         OperationWork erased_work = [work = std::move(work), slot](
                                         CancellationToken token) mutable {
             auto typed = work(token);
-            slot->result = std::make_shared<Result<T>>(std::move(typed));
-            if (*slot->result) {
+            auto produced = std::make_shared<Result<T>>(std::move(typed));
+            const bool success = static_cast<bool>(*produced);
+            std::optional<Error> error;
+            if (!success) error.emplace(produced->error());
+            slot->store(std::move(produced));
+            if (success) {
                 return Result<void>::success();
             }
-            return Result<void>::failure(Error(slot->result->error()));
+            return Result<void>::failure(std::move(*error));
         };
 
         CompletionCallback erased_callback;
@@ -392,15 +450,15 @@ public:
             erased_callback = [callback = std::move(callback), slot](
                                   Result<void> terminal) mutable {
                 if (!terminal) {
-                    slot->result.reset();
+                    slot->clear();
                     callback(Result<T>::failure(
                         Error(terminal.error())));
                     return;
                 }
 
-                if (slot->result) {
-                    auto typed = std::move(*slot->result);
-                    slot->result.reset();
+                auto produced = slot->take();
+                if (produced) {
+                    auto typed = std::move(*produced);
                     callback(std::move(typed));
                     return;
                 }

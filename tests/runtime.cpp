@@ -107,6 +107,16 @@ private:
     std::vector<MoveOnlyFunction<void()>> m_tasks;
 };
 
+bool run_one_when_ready(ControlledExecutor& executor,
+                        std::chrono::milliseconds timeout = 1s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!executor.run_one()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
 struct ThrowingTypedPayload {
     explicit ThrowingTypedPayload(int input) : value(input) {}
     ThrowingTypedPayload(const ThrowingTypedPayload&) = delete;
@@ -135,6 +145,33 @@ static_assert(!std::is_nothrow_move_constructible<Result<ThrowingTypedPayload>>:
 OperationWork success() {
     return [](CancellationToken) { return Result<void>::success(); };
 }
+
+TransportRequest blocking_request() {
+    auto request = TransportRequest::create(
+        HttpMethod::Get, "https://pds.example/xrpc/com.example.test");
+    BSKY_RUNTIME_CHECK(request);
+    return std::move(request.value());
+}
+
+Runtime blocking_external(std::size_t overall_limit,
+                           std::size_t blocking_limit,
+                           std::shared_ptr<IExecutor> executor = {}) {
+    Runtime runtime({RuntimeMode::External,
+                     overall_limit,
+                     {},
+                     std::move(executor),
+                     blocking_limit});
+    BSKY_RUNTIME_CHECK(runtime.start());
+    return runtime;
+}
+
+class ThrowingTransport final : public Transport {
+public:
+    Result<TransportResponse> send(const TransportRequest&,
+                                   CancellationToken) override {
+        throw std::runtime_error("adapter secret must stay contained");
+    }
+};
 
 Runtime external(std::size_t limit = 2U,
                  std::shared_ptr<IExecutor> executor = {}) {
@@ -1494,6 +1531,462 @@ void operation_deadline_semantics() {
         BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
     }
 }
+
+void blocking_transport_bridge_semantics() {
+    // The bridge is explicitly opt-in and validates its transport before
+    // admission; these synchronous failures do not dispatch callbacks.
+    {
+        auto runtime = external(2U);
+        auto disabled = runtime.submit_blocking(
+            {}, blocking_request(), [](Result<TransportResponse>) {
+                BSKY_RUNTIME_CHECK(false);
+            });
+        BSKY_RUNTIME_CHECK(!disabled &&
+                           disabled.error().category() == ErrorCategory::InvalidArgument);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A blocking send runs on the bounded private worker, while the external
+    // hub lane remains available for ordinary work and deadline dispatch.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto transport_calls = std::make_shared<std::atomic<int>>(0);
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release, transport_calls](const TransportRequest&,
+                                                  CancellationToken token) {
+                const auto call = transport_calls->fetch_add(1) + 1;
+                if (call == 1) {
+                    entered->signal();
+                    release->wait();
+                }
+                if (token.is_cancellation_requested()) {
+                    return Result<TransportResponse>::failure(
+                        Error(ErrorCategory::Cancelled, "cancelled", "test"));
+                }
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                response.value().set_body(std::vector<std::uint8_t>{7U, 8U});
+                return response;
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        std::atomic<int> bridge_callbacks{0};
+        auto operation = runtime.submit_blocking(
+            transport,
+            blocking_request(),
+            [&bridge_callbacks](Result<TransportResponse> response) {
+                BSKY_RUNTIME_CHECK(response && response.value().status() == 200U);
+                BSKY_RUNTIME_CHECK(response.value().body() ==
+                                   std::vector<std::uint8_t>({7U, 8U}));
+                ++bridge_callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation);
+        entered->wait();
+
+        std::atomic<int> regular_callbacks{0};
+        auto regular = runtime.submit(
+            success(), [&regular_callbacks](Result<void> result) {
+                BSKY_RUNTIME_CHECK(result);
+                ++regular_callbacks;
+            });
+        BSKY_RUNTIME_CHECK(regular && runtime.process_once());
+        BSKY_RUNTIME_CHECK(regular.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(regular_callbacks == 1);
+
+        // The second bridge operation is queued behind the blocked send. Its
+        // deadline must still be dispatched by the external hub before the
+        // private worker is released; the queued transport call then observes
+        // cancellation and never enters the adapter.
+        OperationOptions deadline_options;
+        deadline_options.deadline = Runtime::TimePoint::clock::now() + 100ms;
+        std::atomic<int> timed_callbacks{0};
+        auto timed = runtime.submit_blocking(
+            transport,
+            blocking_request(),
+            [&timed_callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::TimedOut);
+                ++timed_callbacks;
+            },
+            deadline_options);
+        BSKY_RUNTIME_CHECK(timed);
+        std::this_thread::sleep_until(*deadline_options.deadline + 20ms);
+        BSKY_RUNTIME_CHECK(!timed.value().is_completed());
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(timed.value().wait_for_completion(1s) &&
+                           timed.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(timed_callbacks == 1);
+
+        release->signal();
+        BSKY_RUNTIME_CHECK(operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(bridge_callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(timed.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(transport_calls->load() == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Managed mode must keep the background hub responsive through the same
+    // blocked-worker interleaving. The queued deadline expires on the hub,
+    // then the worker is released and observes the committed timeout.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto transport_calls = std::make_shared<std::atomic<int>>(0);
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release, transport_calls](const TransportRequest&,
+                                                  CancellationToken token) {
+                const auto call = transport_calls->fetch_add(1) + 1;
+                if (call == 1) {
+                    entered->signal();
+                    release->wait();
+                }
+                if (token.is_cancellation_requested()) {
+                    return Result<TransportResponse>::failure(
+                        Error(ErrorCategory::Cancelled, "cancelled", "test"));
+                }
+                return TransportResponse::create(200U);
+            });
+        Runtime runtime({RuntimeMode::Managed, 4U, {}, executor, 2U});
+        BSKY_RUNTIME_CHECK(runtime.start());
+        std::atomic<int> bridge_callbacks{0};
+        auto operation = runtime.submit_blocking(
+            transport,
+            blocking_request(),
+            [&bridge_callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(result && result.value().status() == 200U);
+                ++bridge_callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation);
+        entered->wait();
+
+        std::atomic<int> regular_callbacks{0};
+        auto regular = runtime.submit(
+            success(), [&regular_callbacks](Result<void> result) {
+                BSKY_RUNTIME_CHECK(result);
+                ++regular_callbacks;
+            });
+        BSKY_RUNTIME_CHECK(regular &&
+                           regular.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(regular_callbacks == 1);
+
+        OperationOptions deadline_options;
+        deadline_options.deadline = Runtime::TimePoint::clock::now() + 100ms;
+        std::atomic<int> timed_callbacks{0};
+        auto timed = runtime.submit_blocking(
+            transport,
+            blocking_request(),
+            [&timed_callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::TimedOut);
+                ++timed_callbacks;
+            },
+            deadline_options);
+        BSKY_RUNTIME_CHECK(timed &&
+                           timed.value().wait_for_completion(1s) &&
+                           timed.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(timed_callbacks == 1);
+
+        release->signal();
+        BSKY_RUNTIME_CHECK(operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(bridge_callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(timed.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(transport_calls->load() == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // The queue is bounded by admitted blocking operations, not by an
+    // unbounded TaskManager queue. A single private worker also prevents
+    // concurrent blocking sends in this bridge.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto active = std::make_shared<std::atomic<int>>(0);
+        auto maximum = std::make_shared<std::atomic<int>>(0);
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release, active, maximum](const TransportRequest&,
+                                                 CancellationToken token) {
+                const auto now = active->fetch_add(1) + 1;
+                auto old = maximum->load();
+                while (now > old &&
+                       !maximum->compare_exchange_weak(old, now)) {}
+                entered->signal();
+                release->wait();
+                active->fetch_sub(1);
+                if (token.is_cancellation_requested()) {
+                    return Result<TransportResponse>::failure(
+                        Error(ErrorCategory::Cancelled, "cancelled", "test"));
+                }
+                return TransportResponse::create(204U);
+            });
+        auto runtime = blocking_external(4U, 1U, executor);
+        auto first = runtime.submit_blocking(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(first);
+        entered->wait();
+        auto full = runtime.submit_blocking(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(!full &&
+                           full.error().category() == ErrorCategory::Backpressure);
+        release->signal();
+        BSKY_RUNTIME_CHECK(first.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(maximum->load() == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Cancellation before a queued blocking job reaches the private worker
+    // prevents the transport call from starting while still delivering the
+    // single terminal callback.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto transport_calls = std::make_shared<std::atomic<int>>(0);
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release, transport_calls](const TransportRequest&,
+                                                  CancellationToken token) {
+                const auto call = transport_calls->fetch_add(1) + 1;
+                if (call == 1) {
+                    entered->signal();
+                    release->wait();
+                }
+                if (token.is_cancellation_requested()) {
+                    return Result<TransportResponse>::failure(
+                        Error(ErrorCategory::Cancelled, "cancelled", "test"));
+                }
+                return TransportResponse::create(200U);
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        auto first = runtime.submit_blocking(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(first);
+        entered->wait();
+        std::atomic<int> cancelled_callbacks{0};
+        auto queued = runtime.submit_blocking(
+            transport, blocking_request(),
+            [&cancelled_callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Cancelled);
+                ++cancelled_callbacks;
+            });
+        BSKY_RUNTIME_CHECK(queued);
+        queued.value().request_cancellation();
+        BSKY_RUNTIME_CHECK(queued.value().error_category() ==
+                           ErrorCategory::Cancelled);
+        release->signal();
+        BSKY_RUNTIME_CHECK(first.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(queued.value().await_callback_quiescence(0ms) == false);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(queued.value().await_callback_quiescence(1s));
+        BSKY_RUNTIME_CHECK(cancelled_callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        BSKY_RUNTIME_CHECK(transport_calls->load() == 1);
+    }
+
+    // Cancellation and timeout commit the shared first-winner outcome while
+    // the transport remains blocked; the transport observes the token only
+    // after the gate is released and is never forcibly interrupted.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release](const TransportRequest&, CancellationToken token) {
+                entered->signal();
+                release->wait();
+                if (token.is_cancellation_requested()) {
+                    return Result<TransportResponse>::failure(
+                        Error(ErrorCategory::Cancelled, "cancelled", "test"));
+                }
+                return TransportResponse::create(200U);
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        std::atomic<int> callbacks{0};
+        auto cancelled = runtime.submit_blocking(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Cancelled);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(cancelled);
+        entered->wait();
+        cancelled.value().request_cancellation();
+        BSKY_RUNTIME_CHECK(cancelled.value().error_category() ==
+                           ErrorCategory::Cancelled);
+        release->signal();
+        BSKY_RUNTIME_CHECK(cancelled.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto finished = std::make_shared<Gate>();
+        auto observed_cancel = std::make_shared<std::atomic<bool>>(false);
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release, finished, observed_cancel](
+                const TransportRequest&, CancellationToken token) {
+                entered->signal();
+                release->wait();
+                observed_cancel->store(token.is_cancellation_requested());
+                finished->signal();
+                return TransportResponse::create(200U);
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        std::atomic<int> callbacks{0};
+        auto timed = runtime.submit_blocking(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::TimedOut);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(timed);
+        entered->wait();
+        Access::force_timeout(timed.value());
+        BSKY_RUNTIME_CHECK(timed.value().error_category() == ErrorCategory::TimedOut);
+        BSKY_RUNTIME_CHECK(timed.value().wait_for_completion(1s));
+        release->signal();
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        finished->wait();
+        BSKY_RUNTIME_CHECK(timed.value().await_callback_quiescence(1s));
+        BSKY_RUNTIME_CHECK(observed_cancel->load() && callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Shutdown reports a bounded wait while a blocking send remains in flight,
+    // then succeeds after the cooperative worker returns. Queued callbacks are
+    // suppressed; callback code is never run inline by shutdown().
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release](const TransportRequest&, CancellationToken) {
+                entered->signal();
+                release->wait();
+                return TransportResponse::create(200U);
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        auto operation = runtime.submit_blocking(
+            transport, blocking_request(), [](Result<TransportResponse>) {
+                BSKY_RUNTIME_CHECK(false);
+            });
+        BSKY_RUNTIME_CHECK(operation);
+        entered->wait();
+        auto pending = runtime.shutdown(10ms);
+        BSKY_RUNTIME_CHECK(!pending &&
+                           pending.error().category() == ErrorCategory::ShutdownTimedOut);
+        release->signal();
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        BSKY_RUNTIME_CHECK(operation.value().error_category() ==
+                           ErrorCategory::Shutdown);
+    }
+
+    // Managed shutdown must wake the hub loop when the private worker returns
+    // the last admitted operation. Without that wakeup, the managed loop can
+    // remain asleep after a blocked send is released and the final shutdown
+    // wait expires even though all work is quiescent.
+    {
+        auto entered = std::make_shared<Gate>();
+        auto release = std::make_shared<Gate>();
+        auto returned = std::make_shared<Gate>();
+        auto transport = std::make_shared<FakeTransport>(
+            [entered, release, returned](const TransportRequest&, CancellationToken) {
+                entered->signal();
+                release->wait();
+                returned->signal();
+                return TransportResponse::create(200U);
+            });
+        Runtime runtime({RuntimeMode::Managed, 4U, {}, {}, 1U});
+        BSKY_RUNTIME_CHECK(runtime.start());
+        auto operation = runtime.submit_blocking(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(operation);
+        entered->wait();
+        auto pending = runtime.shutdown(10ms);
+        BSKY_RUNTIME_CHECK(!pending &&
+                           pending.error().category() == ErrorCategory::ShutdownTimedOut);
+        release->signal();
+        returned->wait();
+        BSKY_RUNTIME_CHECK(operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A throwing transport is contained as Internal.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<ThrowingTransport>();
+        auto runtime = blocking_external(4U, 2U, executor);
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_blocking(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Internal);
+                BSKY_RUNTIME_CHECK(result.error().message().find("secret") ==
+                                   std::string::npos);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation &&
+                           operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1 && runtime.shutdown(1s));
+    }
+
+    // A worker rejection after admission is one Shutdown terminal outcome.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeTransport>(
+            [](const TransportRequest&, CancellationToken) {
+                return TransportResponse::create(200U);
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        Access::close_blocking_worker(runtime);
+        std::atomic<int> rejection_callbacks{0};
+        auto rejected = runtime.submit_blocking(
+            transport, blocking_request(),
+            [&rejection_callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Shutdown);
+                ++rejection_callbacks;
+            });
+        BSKY_RUNTIME_CHECK(rejected && rejected.value().is_completed());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(rejection_callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        executor->set_state(ControlledExecutor::State::Reject);
+        auto transport = std::make_shared<FakeTransport>(
+            [](const TransportRequest&, CancellationToken) {
+                return TransportResponse::create(200U);
+            });
+        auto runtime = blocking_external(4U, 2U, executor);
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_blocking(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse>) { ++callbacks; });
+        BSKY_RUNTIME_CHECK(operation);
+        BSKY_RUNTIME_CHECK(operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(operation.value().await_callback_quiescence(1s));
+        BSKY_RUNTIME_CHECK(callbacks == 0 &&
+                           !operation.value().error_category());
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+}
 } // namespace
 
 int main() {
@@ -1520,4 +2013,5 @@ int main() {
     typed_terminal_races_and_faults();
     injected_executor_lifecycle();
     operation_deadline_semantics();
+    blocking_transport_bridge_semantics();
 }
