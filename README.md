@@ -24,6 +24,7 @@ client and XRPC implementation remain deferred.
 - [ADR-0005](docs/adr/0005-executor-abstraction.md)
 - [ADR-0006](docs/adr/0006-operation-deadlines.md)
 - [ADR-0007](docs/adr/0007-blocking-transport-bridge.md)
+- [ADR-0008](docs/adr/0008-native-transport-xrpc-boundary.md)
 - [Reference scenarios](docs/reference-scenarios.md)
 
 The canonical documentation language is English. M0c examples remain
