@@ -113,15 +113,16 @@ invariant or contract from an earlier one.
   forcibly interrupt running work. `Runtime::submit_blocking()` adds an opt-in
   bounded synchronous transport bridge using one ModuleHub-owned private
   worker; it does not create a second scheduler or per-request thread. Future
-  adapters and native asynchronous transport remain unimplemented. The broader
-  acceptance gate is still open.
+  adapters remain unimplemented. The transport-neutral native async M1d1 seam
+  is implemented and tested, but the broader acceptance gate is still open.
 - **Deferred:** native kurlyk forwarding, HTTP/XRPC mapping, retries,
   rate-limit partitions, header conversion, Lexicon datetime integration,
   WebSocket, replay, persistence, and OAuth.
 
-### M1d — Native transport/XRPC integration (planned)
+### M1d — Native transport/XRPC integration (partial)
 
-- **Prerequisites:** M1c and a reviewed kurlyk adapter boundary.
+- **Prerequisites:** M1c and a reviewed kurlyk adapter boundary. M1d0 defines
+  the boundary; M1d1 implements the transport-neutral async completion seam.
 - **Scope:** native completion forwarding, status/XRPC error mapping, operation
   retry/idempotency policy, rate-limit partitions/token release, response header
   conversion, transport cancellation, XRPC encoding/decoding, and timestamp

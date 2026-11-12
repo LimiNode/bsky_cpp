@@ -1,4 +1,5 @@
 #include "bsky_cpp/runtime/runtime.hpp"
+#include "bsky_cpp/runtime/async_transport.hpp"
 #include "bsky_cpp/runtime/detail/runtime_test_access.hpp"
 
 #include <event_hub/module_hub.hpp>
@@ -33,6 +34,8 @@ struct OperationState {
     bool callback_dispatch_pending = false;
     bool stop_handled = false;
     bool blocking = false;
+    bool async_completion_claimed = false;
+    std::shared_ptr<AsyncTransport> async_transport;
     event_hub::TaskId timeout_task_id = 0;
 };
 
@@ -435,6 +438,204 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
         return submit(std::move(work), std::move(erased_callback),
                       std::move(operation_options), true);
+    }
+
+    void complete_async(const std::shared_ptr<OperationState>& state,
+                        const std::shared_ptr<detail::TypedResultSlot<TransportResponse>>& slot,
+                        Result<TransportResponse> response) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->completed || state->async_completion_claimed) return;
+            state->async_completion_claimed = true;
+        }
+
+        try {
+            auto produced = std::make_shared<Result<TransportResponse>>(std::move(response));
+            const bool success = static_cast<bool>(*produced);
+            std::optional<Error> error;
+            if (!success) error.emplace(produced->error());
+            slot->store(std::move(produced));
+            if (success) {
+                complete(state, Result<void>::success());
+            } else {
+                complete(state, Result<void>::failure(std::move(*error)));
+            }
+        } catch (...) {
+            slot->clear();
+            complete(state, Result<void>::failure(Error(
+                ErrorCategory::Internal,
+                "native async completion could not be retained",
+                "runtime.submit_async")));
+        }
+    }
+
+    void discard_async_admission(const std::shared_ptr<OperationState>& state) {
+        CompletionCallback callback;
+        event_hub::TaskId timeout_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (state->completed) return;
+            state->callback_closed = true;
+            state->callback_cleanup = true;
+            callback = std::move(state->callback);
+            state->payload.reset();
+            timeout_id = state->timeout_task_id;
+            state->timeout_task_id = 0;
+            state->work_done = true;
+            state->callback_done = true;
+            state->async_transport.reset();
+            operations.erase(state.get());
+            condition.notify_all();
+        }
+        if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
+        callback.reset();
+    }
+
+    Result<OperationHandle> submit_async(
+        std::shared_ptr<AsyncTransport> transport,
+        TransportRequest request,
+        TypedCompletionCallback<TransportResponse> callback,
+        OperationOptions operation_options) {
+        if (!transport) {
+            return Result<OperationHandle>::failure(Error(
+                ErrorCategory::InvalidArgument,
+                "native async transport is empty",
+                "runtime.submit_async"));
+        }
+
+        static_assert(
+            std::is_nothrow_move_constructible<Result<TransportResponse>>::value,
+            "native async transport requires a nothrow-move response result");
+        auto slot = std::make_shared<detail::TypedResultSlot<TransportResponse>>();
+        CompletionCallback erased_callback;
+        if (callback) {
+            erased_callback = [callback = std::move(callback), slot](
+                                  Result<void> terminal) mutable {
+                if (!terminal) {
+                    slot->clear();
+                    callback(Result<TransportResponse>::failure(
+                        Error(terminal.error())));
+                    return;
+                }
+                auto produced = slot->take();
+                if (produced) {
+                    callback(std::move(*produced));
+                    return;
+                }
+                callback(Result<TransportResponse>::failure(Error(
+                    ErrorCategory::Internal,
+                    "native async transport result was not produced",
+                    "runtime.submit_async")));
+            };
+        }
+
+        auto state = std::make_shared<OperationState>();
+        state->core = shared_from_this();
+        state->callback = std::move(erased_callback);
+        state->callback_done = !state->callback;
+        state->async_transport = transport;
+        bool expired = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!accepting) return Result<OperationHandle>::failure(Error(
+                ErrorCategory::Shutdown,
+                "runtime is not accepting operations",
+                "runtime.submit_async"));
+            if (operations.size() >= options.max_in_flight) {
+                return Result<OperationHandle>::failure(Error(
+                    ErrorCategory::Backpressure,
+                    "operation admission limit reached",
+                    "runtime.submit_async"));
+            }
+            state->work_started = true;
+            operations.emplace(state.get(), state);
+            expired = operation_options.deadline &&
+                      *operation_options.deadline <= std::chrono::steady_clock::now();
+        }
+
+        if (expired) {
+            timeout(state);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                state->work_done = true;
+                (void)retire(state);
+            }
+            return Result<OperationHandle>::success(OperationHandle(state));
+        }
+
+        if (operation_options.deadline) {
+            event_hub::TaskId timeout_id = 0;
+            try {
+                timeout_id = module->tasks().post_at(
+                    *operation_options.deadline,
+                    [weak = std::weak_ptr<OperationState>(state)] {
+                        if (auto live = weak.lock()) live->core->timeout(live);
+                    },
+                    event_hub::TaskOptions{event_hub::TaskPriority::high});
+            } catch (...) {
+                timeout_id = 0;
+            }
+            if (timeout_id == 0) {
+                complete(state, Result<void>::failure(Error(
+                    ErrorCategory::Shutdown,
+                    "deadline registration was rejected",
+                    "runtime.deadline")));
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    state->work_done = true;
+                    (void)retire(state);
+                }
+                return Result<OperationHandle>::success(OperationHandle(state));
+            }
+            bool cancel_timeout = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (state->completed) {
+                    cancel_timeout = true;
+                } else {
+                    state->timeout_task_id = timeout_id;
+                }
+            }
+            if (cancel_timeout) (void)module->tasks().cancel(timeout_id);
+        }
+
+        auto completion = [weak = std::weak_ptr<OperationState>(state), slot](
+                              Result<TransportResponse> response) mutable {
+            if (auto live = weak.lock()) {
+                live->core->complete_async(live, slot, std::move(response));
+            }
+        };
+
+        Result<void> admitted;
+        try {
+            admitted = transport->start(std::move(request), state->cancellation.token(),
+                                        std::move(completion));
+        } catch (...) {
+            admitted = Result<void>::failure(Error(
+                ErrorCategory::Transport,
+                "native async transport start threw",
+                "runtime.submit_async"));
+        }
+
+        if (!admitted) {
+            bool completed = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                completed = state->completed;
+                state->work_done = true;
+                if (completed) (void)retire(state);
+            }
+            if (completed) return Result<OperationHandle>::success(OperationHandle(state));
+            discard_async_admission(state);
+            return Result<OperationHandle>::failure(std::move(admitted.error()));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            state->work_done = true;
+            (void)retire(state);
+        }
+        return Result<OperationHandle>::success(OperationHandle(state));
     }
 
     void timeout(const std::shared_ptr<OperationState>& state) noexcept {
@@ -1056,6 +1257,22 @@ Result<OperationHandle> Runtime::submit_blocking(
                       ErrorCategory::Shutdown,
                       "empty runtime",
                       "runtime.submit_blocking"));
+}
+
+Result<OperationHandle> Runtime::submit_async(
+    std::shared_ptr<AsyncTransport> transport,
+    TransportRequest request,
+    TypedCompletionCallback<TransportResponse> callback,
+    OperationOptions options) {
+    auto core = m_core;
+    return core ? core->submit_async(std::move(transport),
+                                     std::move(request),
+                                     std::move(callback),
+                                     std::move(options))
+                : Result<OperationHandle>::failure(Error(
+                      ErrorCategory::Shutdown,
+                      "empty runtime",
+                      "runtime.submit_async"));
 }
 
 void Runtime::request_stop() noexcept {

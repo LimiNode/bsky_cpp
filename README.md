@@ -7,7 +7,8 @@ framework and it does not contain AI/LLM character logic. The M0 milestones
 provide the C++17 scaffold, `Result`, typed `Error`, cooperative cancellation,
 and the documented async contract. M1a adds strict value types for AT Protocol
 identifiers; M1b adds the transport-neutral request/response seam and fake
-transport; M1c adds an opt-in event-hub-backed operation runtime. The network
+transport; M1c adds an opt-in event-hub-backed operation runtime; M1d1 adds the
+transport-neutral native async completion seam. The network
 client and XRPC implementation remain deferred.
 
 ## Documentation

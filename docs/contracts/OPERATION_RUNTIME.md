@@ -55,6 +55,21 @@ Cancellation, deadlines, and shutdown remain cooperative while `send()` is
 running. A remote side effect may therefore be unknown after a timeout or
 cancellation; the bridge does not retry automatically.
 
+`Runtime::submit_async()` is the native asynchronous transport seam. It takes
+an opt-in `AsyncTransport` lease and transfers the owned request to its
+non-blocking `start()` admission call. Adapter admission failures are
+synchronous and invoke no user callback. An accepted adapter owns the request
+and one move-only completion callback until it reports a terminal
+`TransportResponse`; inline adapter completion is still delivered asynchronously
+through the selected runtime executor. The runtime claims the first completion
+before retaining its payload, so duplicate or late completions cannot replace
+the winning response. Cancellation and deadlines share the existing token and
+first-winner state; they do not create a waiter thread or a second scheduler.
+`FakeAsyncTransport` provides a deterministic handler that may retain and
+invoke the completion later for race and lifetime tests. This is the M1d1
+transport slice only; kurlyk forwarding, HTTP/XRPC mapping, retry policy, and
+endpoint/authentication rules remain later work.
+
 `submit_typed<T>()` uses the same operation state, admission, cancellation,
 shutdown, and callback-registration machinery as `submit()`. Its work returns
 `Result<T>` and its callback receives exactly one move-only `Result<T>` when a
@@ -263,10 +278,10 @@ earlier than the current wait. Explicit `ModuleHub::request_stop()` continues
 to wake its loop.
 
 Still unimplemented: future adapters, high-level Client, XRPC, kurlyk, OAuth,
-WebSocket, and persistence. The blocking bridge is implemented only for the
-bounded synchronous `Transport::send()` seam; native async transport and the
-broader M1c acceptance gates remain open. M1c remains partial and Draft pending
-independent source review;
+WebSocket, and persistence. Native async transport is implemented only as the
+transport-neutral M1d1 seam above; kurlyk integration and the broader M1d/M1c
+acceptance gates remain open. M1c remains partial and Draft pending independent
+source review;
 this contract does not claim that all items in the broader async conformance
 plan are delivered. TSan is run as a
 separate Linux job when supported by the toolchain; stress tests and ASan/UBSan
