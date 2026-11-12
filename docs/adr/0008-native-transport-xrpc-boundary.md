@@ -107,7 +107,9 @@ upstream/raw-header decision.
 - **M1d0:** this contract, kurlyk API/lifetime review, dependency boundary, and
   deterministic test plan.
 - **M1d1:** one native async adapter and fake transport that forward a single
-  HTTP completion through the existing runtime.
+  HTTP completion through the existing runtime. The transport-neutral slice is
+  implemented by `Runtime::submit_async()`, `AsyncTransport`, and
+  `FakeAsyncTransport`; kurlyk forwarding remains deferred.
 - **M1d2:** basic typed XRPC query/procedure encoding and response decoding.
 - **M1d3:** transport/HTTP/XRPC error mapping, retry/idempotency policy,
   rate-limit partitions, endpoint/redirect/auth rules, and security fixtures.
