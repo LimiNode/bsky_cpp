@@ -29,7 +29,8 @@ client and XRPC implementation remain deferred.
 The canonical documentation language is English. M0c examples remain
 conceptual; the implemented runtime is selected with `BSKY_BUILD_RUNTIME=ON`.
 
-The M1c Draft currently runs non-blocking `Result<void>` work, supports
+The merged partial M1c runtime currently runs non-blocking `Result<void>` work,
+supports
 callback-first typed `Result<T>` operations, and provides an opt-in bounded
 blocking transport bridge. Move-only payloads whose `Result<T>` move is
 `noexcept`, the shared `IExecutor` callback dispatch seam, cooperative
