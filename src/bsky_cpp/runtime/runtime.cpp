@@ -617,6 +617,10 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 std::shared_ptr<AsyncTransport> released_transport;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
+                    // No adapter admission has happened yet.  Leave the
+                    // pending state before committing the runtime-side
+                    // deadline failure so the normal callback path can run
+                    // and retire the admitted operation.
                     state->async_admission = OperationState::AsyncAdmission::none;
                     released_transport = std::move(state->async_transport);
                 }

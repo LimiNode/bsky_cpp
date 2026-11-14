@@ -1532,6 +1532,34 @@ void operation_deadline_semantics() {
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 
+    // The same delayed-task rejection must not strand a native async
+    // admission in its pre-start state.  The runtime-side failure is still a
+    // normal terminal callback and the registry entry is retired.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeAsyncTransport>();
+        auto runtime = external(2U, executor);
+        Access::close_executor(runtime);
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 1s;
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Shutdown);
+                ++callbacks;
+            },
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
     // Shutdown suppresses a timeout callback that is still queued on an
     // injected executor; it does not manufacture a second terminal outcome.
     {
