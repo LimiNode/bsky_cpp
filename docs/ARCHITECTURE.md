@@ -45,7 +45,7 @@ Public source files remain colocated with their implementation files under
 - `transport/` — HTTP request/response values and transport seams.
 
 `src/bsky_cpp.hpp` is the canonical umbrella include and exports only these
-stable public domains. The Draft M1c implementation introduces `runtime/` as
+stable public domains. The partial M1c implementation introduces `runtime/` as
 the opt-in operation-lifetime domain under ADR-0004, included separately through
 `bsky_cpp/runtime/runtime.hpp`; its M1d1 native async seam is included through
 `bsky_cpp/runtime/async_transport.hpp`. XRPC, identity, auth, data, client,

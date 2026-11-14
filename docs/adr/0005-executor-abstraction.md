@@ -1,6 +1,6 @@
 # ADR-0005: Callback executor abstraction
 
-- **Status:** Draft M1c implementation
+- **Status:** Accepted for the merged M1c runtime subset; broader M1c remains partial
 - **Date:** 2026-11-06
 - **Depends on:** [ADR-0002](0002-async-execution-contract.md) and
   [ADR-0004](0004-runtime-composition.md)
