@@ -1,6 +1,6 @@
 # M1c operation runtime implementation contract
 
-This describes the Draft implementation in
+This describes the merged partial implementation in
 [`runtime.hpp`](../../src/bsky_cpp/runtime/runtime.hpp), constrained by
 [ADR-0002](../adr/0002-async-execution-contract.md) and
 [ADR-0004](../adr/0004-runtime-composition.md). The blocking bridge decision is
@@ -290,9 +290,8 @@ to wake its loop.
 Still unimplemented: future adapters, high-level Client, XRPC, kurlyk, OAuth,
 WebSocket, and persistence. Native async transport is implemented only as the
 transport-neutral M1d1 seam above; kurlyk integration and the broader M1d/M1c
-acceptance gates remain open. M1c remains partial and Draft pending independent
-source review;
-this contract does not claim that all items in the broader async conformance
-plan are delivered. TSan is run as a
+acceptance gates remain open. The merged M1c runtime subset has passed
+independent source review, but M1c remains partial; this contract does not
+claim that all items in the broader async conformance plan are delivered. TSan is run as a
 separate Linux job when supported by the toolchain; stress tests and ASan/UBSan
 do not substitute for it.
