@@ -22,10 +22,15 @@ Public API layout policy:
 
 - `core/` owns foundational result, error, cancellation, and version types;
   `atproto/` owns protocol identifiers; `transport/` owns transport-neutral
-  request/response values and seams.
+  request/response values and seams; `runtime/` is the reviewed opt-in
+  operation-lifetime domain and is the only current domain that requires
+  `event-hub-cpp`.
 - The umbrella include is `<bsky_cpp.hpp>`; narrow includes should use the
-  owning domain path. The root CMake `BSKY_PUBLIC_HEADERS` list is canonical
-  for installation, Doxygen input, and compile-only header checks.
+  owning domain path. It covers the foundation surface; runtime consumers use
+  `<bsky_cpp/runtime/runtime.hpp>` and
+  `<bsky_cpp/runtime/async_transport.hpp>` explicitly. The root CMake
+  `BSKY_PUBLIC_HEADERS` list is canonical for installation, Doxygen input, and
+  compile-only header checks.
 - Keep private implementation headers under a domain-local `detail/` and do
   not create empty future-domain directories.
 - For documentation changes, run `cmake -S . -B build/docs

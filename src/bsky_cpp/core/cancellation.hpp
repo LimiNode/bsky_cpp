@@ -17,6 +17,12 @@ struct CancellationState {
 }  // namespace detail
 
 /// A copyable observation handle for cooperative cancellation.
+///
+/// \par Thread safety
+/// Copies of a token may be observed concurrently. Observation is atomic and
+/// safe while the shared cancellation state remains alive; moving or
+/// destroying the same token object must not race another access to that
+/// object.
 class CancellationToken {
 public:
     /// Constructs a token that can never be cancelled.
@@ -34,6 +40,11 @@ private:
 };
 
 /// Owns the request side of a cooperative cancellation state.
+///
+/// \par Thread safety
+/// `request_cancellation()`, `is_cancellation_requested()`, and `token()` may
+/// be called concurrently on one source. Moving or destroying the source
+/// object must not race those calls.
 class CancellationSource {
 public:
     /// Creates an active cancellation source.

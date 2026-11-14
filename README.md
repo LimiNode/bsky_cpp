@@ -41,10 +41,19 @@ in
 
 ## Includes
 
-For the complete public surface:
+For the complete foundation public surface:
 
 ```cpp
 #include <bsky_cpp.hpp>
+```
+
+The opt-in runtime component is included separately when
+`BSKY_BUILD_RUNTIME=ON`:
+
+```cpp
+#include <bsky_cpp.hpp>
+#include <bsky_cpp/runtime/runtime.hpp>
+#include <bsky_cpp/runtime/async_transport.hpp>
 ```
 
 For a focused dependency, include the owning domain directly:

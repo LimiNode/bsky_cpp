@@ -54,6 +54,19 @@ implemented.
   first-winner operation state. Callback placement, callback suppression,
   quiescence, typed result ownership, and executor rejection retain the
   semantics of ADR-0002 and `OPERATION_RUNTIME.md`.
+- A successful `start()` is admission only. Terminal cancellation or timeout
+  may be committed before the native request finishes, but the runtime keeps
+  the operation registered, bounded capacity occupied, and the adapter lease
+  alive until the accepted adapter invokes its one completion. The lease is
+  then handed to the existing runtime scheduler or external finalization path
+  for destruction, rather than intentionally destroying the last adapter
+  owner on its completion callback thread. A synchronous admission failure is
+  reconciled atomically with any cancellation or inline completion observed
+  during the call: failure returns no handle and invokes no user callback.
+- Different runtime submissions may call one adapter instance's `start()`
+  concurrently. The adapter owns synchronization of its state, must inspect a
+  pre-cancelled token before causing a network side effect, and must not hold
+  an internal lock while invoking completion.
 - The adapter must forward native completion directly. It must not call
   `future.get()` from an event-loop or kurlyk worker callback and must not add
   a per-request waiter thread.

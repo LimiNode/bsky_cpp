@@ -57,9 +57,10 @@ A document, example, or roadmap item is not evidence of an implementation.
   `AsyncTransport` boundary and deterministic `FakeAsyncTransport` live in
   [`runtime/async_transport.hpp`](../src/bsky_cpp/runtime/async_transport.hpp);
   [`tests/runtime.cpp`](../tests/runtime.cpp) covers synchronous adapter
-  rejection, inline and delayed completion, duplicate/late suppression, and
-  cancellation. This does not implement kurlyk, XRPC mapping, retries, or a
-  high-level Client.
+  rejection, inline and delayed completion, duplicate/late suppression,
+  cancellation, bounded native in-flight lifetime, and adapter-lease release
+  after completion. This does not implement kurlyk, XRPC mapping, retries, or
+  a high-level Client.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
   accepted documentation contract. Managed timed awaiter guarantees in the

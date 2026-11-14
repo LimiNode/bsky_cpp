@@ -18,7 +18,17 @@ namespace bsky_cpp {
 /// callback once. The callback may run inline or later on an adapter-owned
 /// execution context; Runtime always dispatches the user callback through its
 /// configured executor. Implementations must retain owned response values and
-/// must not expose views into temporary adapter buffers.
+/// must not expose views into temporary adapter buffers. Runtime may call
+/// `start()` concurrently for different operations on one adapter instance;
+/// implementations must synchronize adapter state. A pre-cancelled token must
+/// be observed before initiating a network side effect, while cancellation
+/// racing with admission remains cooperative.
+/// \par Thread safety
+/// `start()` may be called concurrently. A completion may be invoked inline or
+/// from any adapter-owned thread, including concurrently with other
+/// completions. Implementations must make their own state and callback
+/// ownership safe for those calls and must not hold internal locks while
+/// invoking completion.
 class AsyncTransport {
 public:
     /// One-shot owned response completion delivered by an adapter.
@@ -38,6 +48,11 @@ public:
     /// \param cancellation Cooperative cancellation token.
     /// \param completion One-shot owned completion callback.
     /// \return Success when admitted, or a typed admission/transport error.
+    /// \par Cancellation
+    /// If `cancellation` is already requested, implementations must reject
+    /// admission with `Cancelled` and must not initiate a new request. A race
+    /// after this observation is cooperative; the adapter reports its one
+    /// terminal completion and the runtime applies first-winner semantics.
     virtual Result<void> start(TransportRequest request,
                                CancellationToken cancellation,
                                Completion completion) = 0;
@@ -48,7 +63,9 @@ public:
 /// The handler controls when and where the completion is invoked. It may move
 /// the completion into a test fixture and invoke it later, which makes
 /// cancellation and duplicate-completion tests deterministic without creating
-/// a scheduler or a worker thread.
+/// a scheduler or a worker thread. The handler may be called concurrently for
+/// different requests and must be safe for concurrent invocation. It runs
+/// outside the request-history mutex and may invoke completion inline.
 class FakeAsyncTransport final : public AsyncTransport {
 public:
     /// Handler used to admit a request and retain or invoke its completion.
@@ -66,8 +83,10 @@ public:
                        CancellationToken cancellation,
                        Completion completion) override;
 
-    /// Returns an owned snapshot of admitted requests.
-    /// \return Requests in admission order.
+    /// Returns an owned snapshot of requests presented to the handler. The
+    /// history records admission attempts before the handler result is known,
+    /// including attempts that the handler rejects.
+    /// \return Requests in handler-call order.
     std::vector<TransportRequest> requests() const;
 
     /// Removes recorded request history.

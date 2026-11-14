@@ -65,6 +65,16 @@ through the selected runtime executor. The runtime claims the first completion
 before retaining its payload, so duplicate or late completions cannot replace
 the winning response. Cancellation and deadlines share the existing token and
 first-winner state; they do not create a waiter thread or a second scheduler.
+Terminal cancellation or timeout does not mean that the native request has
+finished: the operation remains in the active registry, retains its capacity,
+and keeps the adapter lease until the accepted adapter invokes its one
+completion. Only that completion releases the native-operation obligation. The
+lease handoff is drained by the existing runtime scheduler (or the external
+consumer/finalization path), so the last adapter owner is not intentionally
+destroyed on the adapter's completion callback thread.
+`start()` may be called concurrently for different operations on one adapter;
+the adapter must synchronize its state, reject a pre-cancelled token before a
+network side effect, and never invoke completion while holding an internal lock.
 `FakeAsyncTransport` provides a deterministic handler that may retain and
 invoke the completion later for race and lifetime tests. This is the M1d1
 transport slice only; kurlyk forwarding, HTTP/XRPC mapping, retry policy, and

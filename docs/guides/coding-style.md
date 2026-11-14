@@ -7,13 +7,14 @@
 - Prefer RAII, const-correctness, value semantics, explicit ownership, and
   narrow interfaces. Avoid unnecessary copies of large DTOs and unexplained
   default lambda captures.
-- Keep transport and persistence types behind interfaces. Public headers must
-  compile without optional integrations.
+- Keep transport and persistence types behind interfaces. Foundation public
+  headers must compile without optional integrations; opt-in runtime headers
+  may require the reviewed `event-hub-cpp` component.
 - Organize library sources under the owning domain in `src/bsky_cpp/`:
-  `core/`, `atproto/`, or `transport/`. Colocate public `.hpp` and
-  implementation `.cpp` files. Keep `tests/` fixtures and `examples/` opt-in
-  examples separate. Future domains need a reviewed boundary; do not create
-  empty placeholder directories.
+  `core/`, `atproto/`, `transport/`, or the reviewed opt-in `runtime/` domain.
+  Colocate public `.hpp` and implementation `.cpp` files. Keep `tests/`
+  fixtures and `examples/` opt-in examples separate. Future domains need a
+  reviewed boundary; do not create empty placeholder directories.
 - Keep private headers in a domain-local `detail/` directory. Do not put
   unrelated types into generic `utils/`, `data/`, or `enums/` directories.
   Keep one primary type per file where practical.

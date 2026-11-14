@@ -2,9 +2,6 @@
 #include "bsky_cpp/runtime/async_transport.hpp"
 #include "bsky_cpp/runtime/detail/runtime_test_access.hpp"
 
-#include <event_hub/module_hub.hpp>
-#include <event_hub/task.hpp>
-
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -14,10 +11,20 @@
 #include <unordered_map>
 #include <vector>
 
+#include <event_hub/module_hub.hpp>
+#include <event_hub/task.hpp>
+
 namespace bsky_cpp::runtime {
 namespace detail {
 
 struct OperationState {
+    enum class AsyncAdmission {
+        none,
+        pending,
+        accepted,
+        rejected,
+    };
+
     std::shared_ptr<RuntimeCore> core;
     CancellationSource cancellation;
     OperationWork work;
@@ -35,6 +42,7 @@ struct OperationState {
     bool stop_handled = false;
     bool blocking = false;
     bool async_completion_claimed = false;
+    AsyncAdmission async_admission = AsyncAdmission::none;
     std::shared_ptr<AsyncTransport> async_transport;
     event_hub::TaskId timeout_task_id = 0;
 };
@@ -202,6 +210,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     }
 
     void loop_pass() {
+        release_deferred_async_transports();
         bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -231,6 +240,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
         ExecutionScope scope(this);
         try {
+            release_deferred_async_transports();
             const auto count = hub.process_once();
             finish_external_pass(consumer);
             return Result<std::size_t>::success(count);
@@ -443,11 +453,29 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     void complete_async(const std::shared_ptr<OperationState>& state,
                         const std::shared_ptr<detail::TypedResultSlot<TransportResponse>>& slot,
                         Result<TransportResponse> response) {
+        std::shared_ptr<AsyncTransport> released_transport;
+        bool already_completed = false;
+        bool request_hub_stop = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (state->completed || state->async_completion_claimed) return;
+            if (state->async_completion_claimed ||
+                state->async_admission == OperationState::AsyncAdmission::rejected) {
+                return;
+            }
             state->async_completion_claimed = true;
+            state->work_done = true;
+            released_transport = std::move(state->async_transport);
+            already_completed = state->completed;
+            if (already_completed) {
+                request_hub_stop = retire(state);
+            }
         }
+
+        if (released_transport) {
+            defer_async_transport(std::move(released_transport));
+        }
+        if (request_hub_stop) hub.request_stop();
+        if (already_completed) return;
 
         try {
             auto produced = std::make_shared<Result<TransportResponse>>(std::move(response));
@@ -471,10 +499,11 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
     void discard_async_admission(const std::shared_ptr<OperationState>& state) {
         CompletionCallback callback;
+        std::shared_ptr<AsyncTransport> released_transport;
         event_hub::TaskId timeout_id = 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (state->completed) return;
+            state->async_admission = OperationState::AsyncAdmission::rejected;
             state->callback_closed = true;
             state->callback_cleanup = true;
             callback = std::move(state->callback);
@@ -483,12 +512,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             state->timeout_task_id = 0;
             state->work_done = true;
             state->callback_done = true;
-            state->async_transport.reset();
+            released_transport = std::move(state->async_transport);
             operations.erase(state.get());
             condition.notify_all();
         }
         if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
         callback.reset();
+        released_transport.reset();
     }
 
     Result<OperationHandle> submit_async(
@@ -533,6 +563,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         state->core = shared_from_this();
         state->callback = std::move(erased_callback);
         state->callback_done = !state->callback;
+        state->async_admission = OperationState::AsyncAdmission::pending;
         state->async_transport = transport;
         bool expired = false;
         {
@@ -554,6 +585,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
 
         if (expired) {
+            std::shared_ptr<AsyncTransport> released_transport;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                state->async_admission = OperationState::AsyncAdmission::none;
+                released_transport = std::move(state->async_transport);
+            }
+            released_transport.reset();
             timeout(state);
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -576,6 +614,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 timeout_id = 0;
             }
             if (timeout_id == 0) {
+                std::shared_ptr<AsyncTransport> released_transport;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    state->async_admission = OperationState::AsyncAdmission::none;
+                    released_transport = std::move(state->async_transport);
+                }
+                released_transport.reset();
                 complete(state, Result<void>::failure(Error(
                     ErrorCategory::Shutdown,
                     "deadline registration was rejected",
@@ -618,23 +663,15 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         }
 
         if (!admitted) {
-            bool completed = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                completed = state->completed;
-                state->work_done = true;
-                if (completed) (void)retire(state);
-            }
-            if (completed) return Result<OperationHandle>::success(OperationHandle(state));
             discard_async_admission(state);
             return Result<OperationHandle>::failure(std::move(admitted.error()));
         }
 
         {
             std::lock_guard<std::mutex> lock(mutex);
-            state->work_done = true;
-            (void)retire(state);
+            state->async_admission = OperationState::AsyncAdmission::accepted;
         }
+        dispatch_callback(state);
         return Result<OperationHandle>::success(OperationHandle(state));
     }
 
@@ -696,46 +733,18 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         if (request_hub_stop) hub.request_stop();
     }
 
-    void complete(const std::shared_ptr<OperationState>& state,
-                  Result<void> result,
-                  bool request_cancellation = false) {
-        ErrorCategory emergency_category = result
-                                               ? ErrorCategory::Internal
-                                               : result.error().category();
-        bool dispatch = false;
-        bool request_hub_stop = false;
-        event_hub::TaskId timeout_id = 0;
-        try {
-            if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                if (state->completed) return;
-                if (request_cancellation) {
-                    state->cancellation.request_cancellation();
-                }
-                timeout_id = state->timeout_task_id;
-                state->timeout_task_id = 0;
-                state->error = result ? std::nullopt
-                                      : std::optional<ErrorCategory>(result.error().category());
-                state->payload.emplace(std::move(result));
-                state->completed = true;
-                if (state->callback && !state->callback_closed) {
-                    // Reserve delivery under the lifecycle mutex, but call
-                    // user-provided executor code only after releasing it.
-                    state->callback_dispatch_pending = true;
-                    dispatch = true;
-                } else {
-                    state->payload.reset();
-                    state->callback_done = true;
-                }
-                request_hub_stop = retire(state);
+    void dispatch_callback(const std::shared_ptr<OperationState>& state) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!state->completed ||
+                state->async_admission == OperationState::AsyncAdmission::pending ||
+                state->async_admission == OperationState::AsyncAdmission::rejected ||
+                !state->callback || state->callback_closed || state->callback_done ||
+                state->callback_started || state->callback_dispatch_pending) {
+                return;
             }
-        } catch (...) {
-            emergency_complete(state, emergency_category, request_cancellation);
+            state->callback_dispatch_pending = true;
         }
-        if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
-        if (request_hub_stop) hub.request_stop();
-        if (!dispatch) return;
 
         try {
             auto guard = std::make_shared<CallbackDispatchGuard>(
@@ -756,6 +765,42 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         } catch (...) {
             callback_dispatch_abandoned(state);
         }
+    }
+
+    void complete(const std::shared_ptr<OperationState>& state,
+                  Result<void> result,
+                  bool request_cancellation = false) {
+        ErrorCategory emergency_category = result
+                                               ? ErrorCategory::Internal
+                                               : result.error().category();
+        bool request_hub_stop = false;
+        event_hub::TaskId timeout_id = 0;
+        try {
+            if (consume_fault(RuntimeFaultPoint::Terminalization)) throw std::bad_alloc();
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (state->completed) return;
+                if (request_cancellation) {
+                    state->cancellation.request_cancellation();
+                }
+                timeout_id = state->timeout_task_id;
+                state->timeout_task_id = 0;
+                state->error = result ? std::nullopt
+                                      : std::optional<ErrorCategory>(result.error().category());
+                state->payload.emplace(std::move(result));
+                state->completed = true;
+                if (!state->callback || state->callback_closed) {
+                    state->payload.reset();
+                    state->callback_done = true;
+                }
+                request_hub_stop = retire(state);
+            }
+        } catch (...) {
+            emergency_complete(state, emergency_category, request_cancellation);
+        }
+        if (timeout_id != 0) (void)module->tasks().cancel(timeout_id);
+        if (request_hub_stop) hub.request_stop();
+        dispatch_callback(state);
     }
 
     void callback_dispatch_abandoned(const std::shared_ptr<OperationState>& state) noexcept {
@@ -1021,6 +1066,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             if (options.mode != RuntimeMode::External || !stopping || exited ||
                 starting || !operations.empty()) return;
         }
+        release_deferred_async_transports();
         hub.shutdown();
         std::lock_guard<std::mutex> lock(mutex);
         exited = true;
@@ -1045,6 +1091,31 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         return request_hub_stop;
     }
 
+    void defer_async_transport(std::shared_ptr<AsyncTransport> transport) noexcept {
+        if (!transport) return;
+        try {
+            std::lock_guard<std::mutex> lock(mutex);
+            deferred_async_transports.emplace_back(transport);
+        } catch (...) {
+            // The runtime cannot recover a failed handoff allocation. Keep
+            // the completion boundary exception-safe and release this lease
+            // on the current thread as the bounded fallback.
+            transport.reset();
+        }
+    }
+
+    void release_deferred_async_transports() noexcept {
+        std::vector<std::shared_ptr<AsyncTransport>> releases;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            releases.swap(deferred_async_transports);
+        }
+        // Destruction is deliberately outside the runtime mutex. In managed
+        // mode this runs on the ModuleHub thread; external mode runs it on
+        // the consumer/finalization path rather than an adapter callback.
+        releases.clear();
+    }
+
     RuntimeOptions options;
     event_hub::ModuleHub hub;
     RuntimeModule* module = nullptr;
@@ -1055,6 +1126,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     std::mutex lifecycle_mutex;
     std::mutex consumer_mutex;
     std::unordered_map<OperationState*, std::shared_ptr<OperationState>> operations;
+    std::vector<std::shared_ptr<AsyncTransport>> deferred_async_transports;
     std::size_t blocking_operations = 0U;
     bool started = false;
     bool starting = false;
