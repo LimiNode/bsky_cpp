@@ -421,7 +421,10 @@ public:
     /// token is shared with the adapter and a late response cannot replace a
     /// terminal cancellation or timeout. A synchronous `start()` failure
     /// creates no handle and never delivers the user callback, including when
-    /// it races cancellation or an inline completion.
+    /// it races cancellation or an inline completion. In external mode, the
+    /// runtime defers adapter-lease destruction to `process_once()` or final
+    /// shutdown; those deferred leases are bounded by `max_in_flight` and
+    /// temporarily produce `Backpressure` until the consumer makes a pass.
     ///
     /// \param transport Shared lifetime lease for the native async adapter.
     /// \param request Owned request value transferred to the adapter.

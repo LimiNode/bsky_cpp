@@ -2342,6 +2342,38 @@ void native_async_transport_semantics() {
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 
+    // External consumers may process completions less frequently than native
+    // adapters finish. Deferred adapter leases remain alive until the next
+    // consumer pass, but they are bounded by max_in_flight and apply
+    // backpressure before another lease can accumulate.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(2U, executor);
+        std::vector<std::shared_ptr<std::atomic<bool>>> destroyed;
+        for (int index = 0; index != 2; ++index) {
+            auto marker = std::make_shared<std::atomic<bool>>(false);
+            auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+                marker, std::make_shared<std::atomic<bool>>(false));
+            auto operation = runtime.submit_async(
+                transport, blocking_request(), [](Result<TransportResponse>) {});
+            BSKY_RUNTIME_CHECK(operation);
+            transport->complete();
+            BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+            transport.reset();
+            BSKY_RUNTIME_CHECK(!marker->load(std::memory_order_acquire));
+            destroyed.emplace_back(std::move(marker));
+        }
+        auto blocked = runtime.submit_async(
+            std::make_shared<FakeAsyncTransport>(), blocking_request());
+        BSKY_RUNTIME_CHECK(!blocked &&
+                           blocked.error().category() == ErrorCategory::Backpressure);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        for (const auto& marker : destroyed) {
+            BSKY_RUNTIME_CHECK(marker->load(std::memory_order_acquire));
+        }
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
     // A synchronous adapter rejection racing with stop returns only the
     // admission error and never dispatches the terminal callback recorded by
     // the stop path.
