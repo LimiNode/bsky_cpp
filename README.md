@@ -16,6 +16,7 @@ client and XRPC implementation remain deferred.
 - [Architecture](docs/ARCHITECTURE.md) and [invariants](docs/INVARIANTS.md)
 - [Glossary](docs/GLOSSARY.md)
 - [Roadmap](docs/ROADMAP.md) and [implementation status](docs/IMPLEMENTATION_STATUS.md)
+- [Changelog](CHANGELOG.md) and [alpha release preparation](docs/releases/v0.1.0-alpha.1.md)
 - [API contracts](docs/contracts/CLIENT_API.md)
 - [Identifier contract](docs/contracts/IDENTIFIERS.md)
 - [Engineering guides](docs/guides/coding-style.md)
@@ -65,6 +66,52 @@ For a focused dependency, include the owning domain directly:
 
 Public headers are installed from the explicit CMake allowlist. Private
 domain-local `detail/` headers are not part of the SDK.
+
+## Quickstart
+
+The foundation has no optional dependency. The runtime component uses the
+pinned `event-hub-cpp` submodule, so clone with submodules when the runtime is
+needed:
+
+```sh
+git clone --recurse-submodules https://github.com/LimiNode/bsky_cpp.git
+cd bsky_cpp
+
+# Foundation-only build and install.
+cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON
+cmake --build build/debug --parallel
+ctest --test-dir build/debug --output-on-failure
+cmake --install build/debug --prefix build/install/foundation
+```
+
+For the opt-in operation runtime:
+
+```sh
+cmake -S . -B build/runtime -DCMAKE_BUILD_TYPE=Debug \
+  -DBSKY_BUILD_TESTS=ON -DBSKY_BUILD_RUNTIME=ON
+cmake --build build/runtime --parallel
+ctest --test-dir build/runtime --output-on-failure
+cmake --install build/runtime --prefix build/install/runtime
+```
+
+An installed foundation consumer uses the foundation target only:
+
+```cmake
+find_package(bsky_cpp CONFIG REQUIRED)
+target_link_libraries(app PRIVATE bsky_cpp::bsky_cpp)
+```
+
+An installed runtime consumer opts in explicitly:
+
+```cmake
+find_package(bsky_cpp CONFIG REQUIRED COMPONENTS runtime)
+target_link_libraries(app PRIVATE bsky_cpp::runtime)
+```
+
+The alpha preview does not contain a Bluesky network `Client`, XRPC codec,
+authentication, social operations, or a `kurlyk` adapter. The native async seam
+is transport-neutral and the runtime is opt-in; these are not claims of a
+working network integration.
 
 ## Scope and status
 

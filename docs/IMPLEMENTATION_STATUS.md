@@ -81,16 +81,18 @@ regression, and no unimplemented item is a blocker for the documented merged
 subset. The broader milestone remains partial until the explicitly deferred
 M1d boundaries are delivered and reviewed.
 
-- M1d1 native transport slice: `Runtime::submit_async()` forwards one owned
+- M1d1 native transport slice (PR #18, merge commit
+  `a4e03f283581165fe3f0435dabd0e1337e841d64`): `Runtime::submit_async()` forwards one owned
   response completion through the existing operation state machine without
   `future.get()`, per-request waiters, or a second scheduler. The public
   `AsyncTransport` boundary and deterministic `FakeAsyncTransport` live in
   [`runtime/async_transport.hpp`](../src/bsky_cpp/runtime/async_transport.hpp);
   [`tests/runtime.cpp`](../tests/runtime.cpp) covers synchronous adapter
   rejection, inline and delayed completion, duplicate/late suppression,
-  cancellation, bounded native in-flight lifetime, and adapter-lease release
-  after completion. This does not implement kurlyk, XRPC mapping, retries, or
-  a high-level Client.
+  cancellation, bounded native in-flight lifetime, deadline-registration
+  rejection, and adapter-lease release after completion. The exact-head CI
+  matrix for PR #18 passed in runs `43655864314` and `43655867940`; this does
+  not implement kurlyk, XRPC mapping, retries, or a high-level Client.
 
 - M0 is complete as scoped: M0a/M0b are implemented and M0c remains the
   accepted documentation contract. Managed timed awaiter guarantees in the

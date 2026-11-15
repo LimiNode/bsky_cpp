@@ -39,6 +39,14 @@ jobs:
         run: cmake --build build/consumer --config ${{ matrix.build_type }} --parallel
       - name: Consumer test
         run: ctest --test-dir build/consumer --build-config ${{ matrix.build_type }} --output-on-failure
+      - name: Package version compatibility
+        run: >-
+          cmake
+          -DPREFIX="${{ github.workspace }}/build/install"
+          -DSOURCE_DIR="${{ github.workspace }}"
+          -DOUTPUT="${{ github.workspace }}/build/package-version"
+          -DBUILD_TYPE=${{ matrix.build_type }}
+          -P tools/check_package_version.cmake
 
   sanitizers:
     name: Ubuntu / sanitizers

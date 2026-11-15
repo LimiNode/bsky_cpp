@@ -185,7 +185,9 @@ endforeach()
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/bsky_cppConfigVersion.cmake"
-    COMPATIBILITY SameMajorVersion
+    # Before 1.0, a minor release may change the public API. Keep consumers
+    # on the same 0.x minor line until a reviewed stability policy replaces it.
+    COMPATIBILITY SameMinorVersion
 )
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bsky_cppConfig.cmake.in"
