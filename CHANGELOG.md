@@ -8,7 +8,7 @@ line.
 
 - Continue M1d protocol and concrete transport work after the preview gate.
 
-## [0.1.0-alpha.1] - 2026-11-15
+## [0.1.0-alpha.1]
 
 This is an engineering preview of the C++17 foundation and opt-in operation
 runtime. It is suitable for build, packaging, and lifecycle integration tests;

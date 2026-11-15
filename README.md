@@ -73,6 +73,8 @@ The foundation has no optional dependency. The runtime component uses the
 pinned `event-hub-cpp` submodule, so clone with submodules when the runtime is
 needed:
 
+POSIX-compatible shell (`sh`, Bash, or Zsh):
+
 ```sh
 git clone --recurse-submodules https://github.com/LimiNode/bsky_cpp.git
 cd bsky_cpp
@@ -93,6 +95,21 @@ cmake --build build/runtime --parallel
 ctest --test-dir build/runtime --output-on-failure
 cmake --install build/runtime --prefix build/install/runtime
 ```
+
+Windows PowerShell (the same commands without POSIX `\` continuations):
+
+```powershell
+git clone --recurse-submodules https://github.com/LimiNode/bsky_cpp.git
+Set-Location bsky_cpp
+cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBSKY_BUILD_TESTS=ON
+cmake --build build/debug --parallel
+ctest --test-dir build/debug --output-on-failure
+cmake --install build/debug --prefix build/install/foundation
+```
+
+To include the optional runtime in PowerShell, configure a separate tree with
+`-DBSKY_BUILD_RUNTIME=ON`, then build, test, and install that tree in the same
+way.
 
 An installed foundation consumer uses the foundation target only:
 
