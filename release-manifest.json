@@ -1,0 +1,12 @@
+{
+  "name": "bsky_cpp",
+  "version": "0.1.0-alpha.1",
+  "cmake_version": "0.1.0",
+  "pre_release": true,
+  "git_tag": "v0.1.0-alpha.1",
+  "components": ["foundation", "runtime"],
+  "runtime_required_submodules": ["external/event-hub-cpp"],
+  "network_client": false,
+  "xrpc": false,
+  "kurlyk_adapter": false
+}
