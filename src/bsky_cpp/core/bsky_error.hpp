@@ -79,6 +79,11 @@ public:
     /// \return The metadata entries in insertion order.
     const std::vector<Metadata>& metadata() const noexcept;
 
+    /// \par Thread safety
+    /// An `Error` object is not thread-safe because `add_metadata()` mutates
+    /// the value. Concurrent const access is safe only when no thread mutates
+    /// or moves/destroys the same object.
+
 private:
     static bool is_allowed_key(std::string_view key) noexcept;
     static bool is_valid_value(std::string_view key, std::string_view value) noexcept;

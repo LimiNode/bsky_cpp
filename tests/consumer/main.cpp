@@ -2,6 +2,7 @@
 
 #ifdef BSKY_CONSUMER_RUNTIME
 #include <bsky_cpp/runtime/runtime.hpp>
+#include <bsky_cpp/runtime/async_transport.hpp>
 #endif
 
 #include <string>
@@ -165,6 +166,35 @@ int main() {
     bridge_executor->drain();
     if (!bridge_operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
         !bridge_delivered || !bridge_runtime.shutdown(std::chrono::seconds(1))) {
+        return 1;
+    }
+
+    auto async_executor = std::make_shared<ConsumerExecutor>();
+    bsky_cpp::runtime::Runtime async_runtime(
+        {bsky_cpp::runtime::RuntimeMode::External, 4U, {}, async_executor});
+    if (!async_runtime.start()) return 1;
+    auto async_transport = std::make_shared<bsky_cpp::FakeAsyncTransport>(
+        [](bsky_cpp::TransportRequest, bsky_cpp::CancellationToken,
+           bsky_cpp::AsyncTransport::Completion completion) {
+            auto response = bsky_cpp::TransportResponse::create(204U);
+            if (!response) return bsky_cpp::Result<void>::failure(response.error());
+            completion(std::move(response));
+            return bsky_cpp::Result<void>::success();
+        });
+    auto async_request = bsky_cpp::TransportRequest::create(
+        bsky_cpp::HttpMethod::Get, "https://example.com/async");
+    if (!async_request) return 1;
+    std::atomic<bool> async_delivered{false};
+    auto async_operation = async_runtime.submit_async(
+        async_transport,
+        std::move(async_request.value()),
+        [&async_delivered](bsky_cpp::Result<bsky_cpp::TransportResponse> response) {
+            async_delivered = response && response.value().status() == 204U;
+        });
+    if (!async_operation || !async_runtime.process_once()) return 1;
+    async_executor->drain();
+    if (!async_operation.value().await_callback_quiescence(std::chrono::seconds(1)) ||
+        !async_delivered || !async_runtime.shutdown(std::chrono::seconds(1))) {
         return 1;
     }
 #endif

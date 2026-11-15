@@ -1,4 +1,5 @@
 #include "bsky_cpp/runtime/runtime.hpp"
+#include "bsky_cpp/runtime/async_transport.hpp"
 #include "bsky_cpp/runtime/detail/runtime_test_access.hpp"
 #include "test_support.hpp"
 
@@ -171,6 +172,47 @@ public:
                                    CancellationToken) override {
         throw std::runtime_error("adapter secret must stay contained");
     }
+};
+
+class DestructionProbeAsyncTransport final : public AsyncTransport {
+public:
+    DestructionProbeAsyncTransport(std::shared_ptr<std::atomic<bool>> destroyed,
+                                   std::shared_ptr<std::atomic<bool>> on_callback)
+        : m_destroyed(std::move(destroyed)),
+          m_on_callback(std::move(on_callback)) {}
+
+    ~DestructionProbeAsyncTransport() override {
+        m_destroyed->store(true, std::memory_order_release);
+        if (std::this_thread::get_id() == m_completion_thread) {
+            m_on_callback->store(true, std::memory_order_release);
+        }
+    }
+
+    Result<void> start(TransportRequest, CancellationToken,
+                       Completion completion) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_completion = std::move(completion);
+        return Result<void>::success();
+    }
+
+    void complete() {
+        Completion completion;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            completion = std::move(m_completion);
+        }
+        m_completion_thread = std::this_thread::get_id();
+        auto response = TransportResponse::create(200U);
+        BSKY_RUNTIME_CHECK(response);
+        completion(std::move(response));
+    }
+
+private:
+    std::shared_ptr<std::atomic<bool>> m_destroyed;
+    std::shared_ptr<std::atomic<bool>> m_on_callback;
+    std::mutex m_mutex;
+    Completion m_completion;
+    std::thread::id m_completion_thread;
 };
 
 Runtime external(std::size_t limit = 2U,
@@ -1490,6 +1532,34 @@ void operation_deadline_semantics() {
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 
+    // The same delayed-task rejection must not strand a native async
+    // admission in its pre-start state.  The runtime-side failure is still a
+    // normal terminal callback and the registry entry is retired.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeAsyncTransport>();
+        auto runtime = external(2U, executor);
+        Access::close_executor(runtime);
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() + 1s;
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Shutdown);
+                ++callbacks;
+            },
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Shutdown);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
     // Shutdown suppresses a timeout callback that is still queued on an
     // injected executor; it does not manufacture a second terminal outcome.
     {
@@ -1987,6 +2057,404 @@ void blocking_transport_bridge_semantics() {
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 }
+
+void native_async_transport_semantics() {
+    // Native adapter admission is synchronous, while the terminal callback is
+    // still delivered only through the selected executor.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto pending = std::make_shared<AsyncTransport::Completion>();
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [pending](TransportRequest request, CancellationToken,
+                      AsyncTransport::Completion completion) {
+                BSKY_RUNTIME_CHECK(request.url().find("/xrpc/") != std::string::npos);
+                *pending = std::move(completion);
+                return Result<void>::success();
+            });
+        auto runtime = external(4U, executor);
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> response) {
+                BSKY_RUNTIME_CHECK(response && response.value().status() == 200U);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation && !operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(transport->requests().size() == 1U);
+        auto response = TransportResponse::create(200U);
+        BSKY_RUNTIME_CHECK(response);
+        (*pending)(std::move(response));
+        BSKY_RUNTIME_CHECK(operation.value().wait_for_completion(1s));
+        BSKY_RUNTIME_CHECK(callbacks == 0);
+
+        // A duplicate completion cannot replace the first payload even while
+        // callback delivery is still queued.
+        auto duplicate = TransportResponse::create(201U);
+        BSKY_RUNTIME_CHECK(duplicate);
+        (*pending)(std::move(duplicate));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1 &&
+                           operation.value().await_callback_quiescence(0ms));
+
+        // A late completion after callback quiescence is ignored as well.
+        auto late = TransportResponse::create(202U);
+        BSKY_RUNTIME_CHECK(late);
+        (*pending)(std::move(late));
+        BSKY_RUNTIME_CHECK(callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A cancellation wins before the adapter completion and suppresses a late
+    // response without requiring a waiter thread or a second scheduler.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto pending = std::make_shared<AsyncTransport::Completion>();
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [pending](TransportRequest, CancellationToken,
+                      AsyncTransport::Completion completion) {
+                *pending = std::move(completion);
+                return Result<void>::success();
+            });
+        auto runtime = external(4U, executor);
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> response) {
+                BSKY_RUNTIME_CHECK(!response &&
+                                   response.error().category() == ErrorCategory::Cancelled);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation);
+        operation.value().request_cancellation();
+        BSKY_RUNTIME_CHECK(operation.value().error_category() == ErrorCategory::Cancelled);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        auto late = TransportResponse::create(200U);
+        BSKY_RUNTIME_CHECK(late);
+        (*pending)(std::move(late));
+        BSKY_RUNTIME_CHECK(callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Adapter admission failures are synchronous and never invoke the user
+    // callback. This is distinct from an accepted transport error completion.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeAsyncTransport>();
+        auto runtime = external(4U, executor);
+        std::atomic<int> callbacks{0};
+        auto rejected = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse>) { ++callbacks; });
+        BSKY_RUNTIME_CHECK(!rejected &&
+                           rejected.error().category() == ErrorCategory::Transport);
+        BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A non-conforming adapter that completes inline and then reports a
+    // synchronous rejection is still reconciled as a rejection: no handle and
+    // no user callback escape the admission boundary.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken,
+               AsyncTransport::Completion completion) {
+                auto response = TransportResponse::create(418U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::failure(
+                    Error(ErrorCategory::Transport,
+                          "completion followed by rejection", "test.async_start"));
+            });
+        auto runtime = external(2U, executor);
+        std::atomic<int> callbacks{0};
+        auto rejected = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse>) { ++callbacks; });
+        BSKY_RUNTIME_CHECK(!rejected &&
+                           rejected.error().category() == ErrorCategory::Transport);
+        BSKY_RUNTIME_CHECK(callbacks == 0 &&
+                           Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // An inline adapter completion still reaches the user asynchronously.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken,
+               AsyncTransport::Completion completion) {
+                auto response = TransportResponse::create(204U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::success();
+            });
+        auto runtime = external(4U, executor);
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> response) {
+                BSKY_RUNTIME_CHECK(response && response.value().status() == 204U);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation && callbacks == 0);
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1 && runtime.shutdown(1s));
+    }
+
+    // An expired deadline commits before adapter dispatch and therefore does
+    // not call the native transport at all.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken, AsyncTransport::Completion) {
+                BSKY_RUNTIME_CHECK(false);
+                return Result<void>::success();
+            });
+        auto runtime = external(4U, executor);
+        OperationOptions options;
+        options.deadline = Runtime::TimePoint::clock::now() - 1ms;
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> response) {
+                BSKY_RUNTIME_CHECK(!response &&
+                                   response.error().category() == ErrorCategory::TimedOut);
+                ++callbacks;
+            },
+            options);
+        BSKY_RUNTIME_CHECK(operation && operation.value().is_completed());
+        BSKY_RUNTIME_CHECK(transport->requests().empty());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1 && runtime.shutdown(1s));
+    }
+
+    // A pre-cancelled token is rejected before the adapter handler can cause a
+    // new request. Cancellation racing with a later admission remains
+    // cooperative and is covered by the runtime cases above.
+    {
+        std::atomic<int> handler_calls{0};
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [&handler_calls](TransportRequest, CancellationToken,
+                             AsyncTransport::Completion) {
+                ++handler_calls;
+                return Result<void>::success();
+            });
+        CancellationSource source;
+        BSKY_RUNTIME_CHECK(source.request_cancellation());
+        auto result = transport->start(
+            blocking_request(), source.token(), AsyncTransport::Completion{});
+        BSKY_RUNTIME_CHECK(!result &&
+                           result.error().category() == ErrorCategory::Cancelled);
+        BSKY_RUNTIME_CHECK(handler_calls == 0);
+    }
+
+    // Native admission does not release capacity or the transport lease until
+    // the accepted adapter reports its completion. A terminal cancellation is
+    // only the logical outcome; the network obligation remains active.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto pending = std::vector<AsyncTransport::Completion>();
+        auto lease_marker = std::make_shared<int>(7);
+        const std::weak_ptr<int> lease_observer = lease_marker;
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [&pending, lease_marker](TransportRequest, CancellationToken,
+                                     AsyncTransport::Completion completion) {
+                pending.emplace_back(std::move(completion));
+                return Result<void>::success();
+            });
+        lease_marker.reset();
+        auto runtime = external(1U, executor);
+        std::atomic<int> callbacks{0};
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [&callbacks](Result<TransportResponse> result) {
+                BSKY_RUNTIME_CHECK(!result &&
+                                   result.error().category() == ErrorCategory::Cancelled);
+                ++callbacks;
+            });
+        BSKY_RUNTIME_CHECK(operation && pending.size() == 1U);
+        transport.reset();
+        operation.value().request_cancellation();
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 1);
+
+        auto blocked = runtime.submit_async(
+            std::make_shared<FakeAsyncTransport>(), blocking_request());
+        BSKY_RUNTIME_CHECK(!blocked &&
+                           blocked.error().category() == ErrorCategory::Backpressure);
+        auto response = TransportResponse::create(200U);
+        BSKY_RUNTIME_CHECK(response);
+        pending.front()(std::move(response));
+        pending.front().reset();
+        BSKY_RUNTIME_CHECK(Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(lease_observer.expired());
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Shutdown reports a timeout while an accepted native request still owns
+    // the operation slot, then succeeds after the adapter completion arrives.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto pending = std::make_shared<AsyncTransport::Completion>();
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [pending](TransportRequest, CancellationToken,
+                      AsyncTransport::Completion completion) {
+                *pending = std::move(completion);
+                return Result<void>::success();
+            });
+        auto runtime = external(2U, executor);
+        auto operation = runtime.submit_async(
+            transport, blocking_request(),
+            [](Result<TransportResponse>) {});
+        BSKY_RUNTIME_CHECK(operation);
+        runtime.request_stop();
+        auto timed_out = runtime.shutdown(1ms);
+        BSKY_RUNTIME_CHECK(!timed_out &&
+                           timed_out.error().category() == ErrorCategory::ShutdownTimedOut);
+        auto response = TransportResponse::create(204U);
+        BSKY_RUNTIME_CHECK(response);
+        (*pending)(std::move(response));
+        pending->reset();
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // The runtime does not destroy the last adapter lease on the native
+    // completion thread. It hands the lease to the existing external
+    // consumer path instead.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto destroyed = std::make_shared<std::atomic<bool>>(false);
+        auto destroyed_on_callback = std::make_shared<std::atomic<bool>>(false);
+        auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+            destroyed, destroyed_on_callback);
+        auto runtime = external(2U, executor);
+        auto operation = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(operation);
+        std::thread completion_thread([&transport] { transport->complete(); });
+        completion_thread.join();
+        transport.reset();
+        BSKY_RUNTIME_CHECK(!destroyed->load(std::memory_order_acquire));
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        BSKY_RUNTIME_CHECK(destroyed->load(std::memory_order_acquire) &&
+                           !destroyed_on_callback->load(std::memory_order_acquire));
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A synchronous adapter rejection racing with stop returns only the
+    // admission error and never dispatches the terminal callback recorded by
+    // the stop path.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool entered = false;
+        bool release = false;
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [&mutex, &condition, &entered, &release](
+                TransportRequest, CancellationToken,
+                AsyncTransport::Completion) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    entered = true;
+                    condition.notify_all();
+                }
+                std::unique_lock<std::mutex> lock(mutex);
+                condition.wait(lock, [&release] { return release; });
+                return Result<void>::failure(
+                    Error(ErrorCategory::Transport,
+                          "admission rejected by test", "test.async_start"));
+            });
+        auto runtime = external(2U, executor);
+        std::atomic<int> callbacks{0};
+        std::optional<Result<OperationHandle>> rejected;
+        std::thread submitter([&] {
+            rejected.emplace(runtime.submit_async(
+                transport, blocking_request(),
+                [&callbacks](Result<TransportResponse>) { ++callbacks; }));
+        });
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            BSKY_RUNTIME_CHECK(condition.wait_for(
+                lock, 1s, [&entered] { return entered; }));
+        }
+        runtime.request_stop();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            release = true;
+            condition.notify_all();
+        }
+        submitter.join();
+        BSKY_RUNTIME_CHECK(rejected.has_value() && !rejected.value() &&
+                           rejected->error().category() == ErrorCategory::Transport);
+        BSKY_RUNTIME_CHECK(callbacks == 0 && Access::registered_operations(runtime) == 0U);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Different submissions may enter one adapter concurrently. The fake
+    // handler is synchronized only for the admission gate; it does not hold a
+    // lock while invoking completion.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::size_t starts = 0U;
+        bool release = false;
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [&mutex, &condition, &starts, &release](
+                TransportRequest, CancellationToken,
+                AsyncTransport::Completion completion) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ++starts;
+                    condition.notify_all();
+                }
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    condition.wait(lock, [&release] { return release; });
+                }
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::success();
+            });
+        auto runtime = external(4U, executor);
+        std::atomic<int> callbacks{0};
+        std::optional<Result<OperationHandle>> first;
+        std::optional<Result<OperationHandle>> second;
+        std::thread one([&] {
+            first.emplace(runtime.submit_async(
+                transport, blocking_request(),
+                [&callbacks](Result<TransportResponse> result) {
+                    BSKY_RUNTIME_CHECK(result);
+                    ++callbacks;
+                }));
+        });
+        std::thread two([&] {
+            second.emplace(runtime.submit_async(
+                transport, blocking_request(),
+                [&callbacks](Result<TransportResponse> result) {
+                    BSKY_RUNTIME_CHECK(result);
+                    ++callbacks;
+                }));
+        });
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            BSKY_RUNTIME_CHECK(condition.wait_for(
+                lock, 1s, [&starts] { return starts == 2U; }));
+            release = true;
+            condition.notify_all();
+        }
+        one.join();
+        two.join();
+        BSKY_RUNTIME_CHECK(first.has_value() && first.value() &&
+                           second.has_value() && second.value());
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(run_one_when_ready(*executor));
+        BSKY_RUNTIME_CHECK(callbacks == 2 && runtime.shutdown(1s));
+    }
+}
 } // namespace
 
 int main() {
@@ -2014,4 +2482,5 @@ int main() {
     injected_executor_lifecycle();
     operation_deadline_semantics();
     blocking_transport_bridge_semantics();
+    native_async_transport_semantics();
 }

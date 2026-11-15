@@ -7,8 +7,6 @@
 #include "bsky_cpp/core/result.hpp"
 #include "bsky_cpp/transport/transport.hpp"
 
-#include <event_hub/notifier.hpp>
-
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,6 +17,12 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+
+#include <event_hub/notifier.hpp>
+
+namespace bsky_cpp {
+class AsyncTransport;
+}
 
 namespace bsky_cpp::runtime {
 
@@ -130,6 +134,9 @@ public:
     /// \return `true` when accepted; `false` when rejected before admission.
     /// \throws Any exception is treated by Runtime as rejection and must not
     ///         escape into user work or callback code.
+    /// \par Thread safety
+    /// Implementations must synchronize concurrent calls to `post()` and may
+    /// invoke or destroy an accepted task on any executor-owned thread.
     virtual bool post(ExecutorTask task) = 0;
 };
 
@@ -391,6 +398,38 @@ public:
     ///         Backpressure, or Shutdown error.
     Result<OperationHandle> submit_blocking(
         std::shared_ptr<Transport> transport,
+        TransportRequest request,
+        TypedCompletionCallback<TransportResponse> callback = {},
+        OperationOptions options = {});
+
+    /// Starts one native asynchronous transport operation and forwards its
+    /// terminal response through the existing runtime state machine.
+    ///
+    /// The transport's `start()` method is called synchronously on the
+    /// admission path and must admit the request without blocking. An accepted
+    /// transport owns the request and completion callback until it invokes the
+    /// callback at most once. Runtime callback delivery remains asynchronous
+    /// through the selected executor; no waiter thread or blocking bridge is
+    /// used. The same adapter instance may receive concurrent `start()` calls
+    /// from concurrent submissions. The adapter must synchronize its own state,
+    /// inspect a pre-cancelled token before causing a network side effect, and
+    /// may invoke completion inline or later on any adapter-owned thread.
+    /// A successful `start()` is admission only. Cancellation or a deadline
+    /// may commit the logical terminal result before native completion; the
+    /// operation remains counted against capacity and retains the adapter
+    /// lease until that completion arrives. Cancellation is cooperative: the
+    /// token is shared with the adapter and a late response cannot replace a
+    /// terminal cancellation or timeout. A synchronous `start()` failure
+    /// creates no handle and never delivers the user callback, including when
+    /// it races cancellation or an inline completion.
+    ///
+    /// \param transport Shared lifetime lease for the native async adapter.
+    /// \param request Owned request value transferred to the adapter.
+    /// \param callback Optional typed response callback.
+    /// \param options Optional absolute monotonic deadline.
+    /// \return An operation handle or a synchronous admission error.
+    Result<OperationHandle> submit_async(
+        std::shared_ptr<AsyncTransport> transport,
         TransportRequest request,
         TypedCompletionCallback<TransportResponse> callback = {},
         OperationOptions options = {});

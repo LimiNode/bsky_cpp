@@ -29,6 +29,7 @@ set(BSKY_FOUNDATION_PUBLIC_HEADERS
 
 set(BSKY_RUNTIME_PUBLIC_HEADERS
     src/bsky_cpp/runtime/runtime.hpp
+    src/bsky_cpp/runtime/async_transport.hpp
 )
 set(BSKY_PUBLIC_HEADERS ${BSKY_FOUNDATION_PUBLIC_HEADERS})
 if(BSKY_BUILD_RUNTIME)
@@ -113,6 +114,7 @@ if(BSKY_BUILD_RUNTIME)
     find_package(Threads REQUIRED)
     add_library(bsky_cpp_runtime STATIC
         src/bsky_cpp/runtime/runtime.cpp
+        src/bsky_cpp/runtime/async_transport.cpp
     )
     add_library(bsky_cpp::runtime ALIAS bsky_cpp_runtime)
     target_compile_features(bsky_cpp_runtime PUBLIC cxx_std_17)

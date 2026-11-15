@@ -9,12 +9,15 @@
   AT URI, CID, and StrongRef.
 - `transport/` contains transport-neutral request/response values and the
   synchronous adapter seam. It does not select an HTTP implementation.
+- `runtime/` is the reviewed opt-in operation-lifetime domain. It depends on
+  `event-hub-cpp` only when `BSKY_BUILD_RUNTIME=ON`; its `detail/` headers remain
+  private and are never installed.
 
 Future domains are added only when they have a real public boundary. Do not add
 empty directories or placeholder classes. Private implementation headers stay
 in a domain-local `detail/` directory and are never installed.
 
-The complete public API is available through:
+The complete foundation public API is available through:
 
 ```cpp
 #include <bsky_cpp.hpp>
@@ -25,6 +28,14 @@ Focused code may include a narrow domain header such as
 `BSKY_PUBLIC_HEADERS` is the single allowlist used to install headers, generate
 Doxygen input, and build header self-containment checks. Preserve its relative
 layout under `include/` and do not recursively install `src/bsky_cpp/`.
+
+Runtime consumers include the opt-in headers explicitly:
+
+```cpp
+#include <bsky_cpp.hpp>
+#include <bsky_cpp/runtime/runtime.hpp>
+#include <bsky_cpp/runtime/async_transport.hpp>
+```
 
 When adding a public type, update the allowlist, umbrella header when
 appropriate, Doxygen comments, tests, installation/export checks, and the

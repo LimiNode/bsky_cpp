@@ -13,6 +13,10 @@
 namespace bsky_cpp {
 
 /// A syntactically valid DID. Method support is reported separately.
+///
+/// \par Thread safety
+/// Identifier values have no mutation operations. Concurrent const access and
+/// comparison are safe when the same object is not moved or destroyed.
 class Did {
 public:
     /// Parses and validates a DID string.
@@ -53,6 +57,10 @@ private:
 };
 
 /// A canonical, ASCII-lowercase AT Protocol handle.
+///
+/// \par Thread safety
+/// The value has no mutation operations. Concurrent const access and
+/// comparison are safe when the same object is not moved or destroyed.
 class Handle {
 public:
     /// Parses and canonicalizes an AT Protocol handle.
@@ -80,6 +88,10 @@ private:
 };
 
 /// A validated NSID used as an AT Protocol collection name.
+///
+/// \par Thread safety
+/// The value has no mutation operations. Concurrent const access is safe when
+/// the same object is not moved or destroyed.
 class Nsid {
 public:
     /// Parses and validates an NSID.
@@ -98,6 +110,10 @@ private:
 };
 
 /// A case-sensitive record key using the AT Protocol restricted character set.
+///
+/// \par Thread safety
+/// The value has no mutation operations. Concurrent const access is safe when
+/// the same object is not moved or destroyed.
 class RecordKey {
 public:
     /// Parses and validates a record key.
@@ -118,6 +134,10 @@ private:
 /// A parsed at:// URI. A URI may be DID- or handle-authorized and may omit
 /// the collection when it identifies an authority origin. Query and fragment
 /// components are preserved verbatim.
+///
+/// \par Thread safety
+/// The value has no mutation operations. Concurrent const access is safe when
+/// the same object is not moved or destroyed.
 class AtUri {
 public:
     /// Parses and validates an at:// URI.
@@ -179,6 +199,10 @@ private:
 /// A structurally decoded CID. Parsing accepts general CIDv1 and CIDv0 forms;
 /// is_atproto_record() identifies dag-cbor record CIDs and is_atproto_blob()
 /// identifies raw blob CIDs. is_atproto() accepts either AT Protocol form.
+///
+/// \par Thread safety
+/// The value has no mutation operations. Concurrent const access and
+/// comparison are safe when the same object is not moved or destroyed.
 class Cid {
 public:
     /// Parses a CIDv0 or CIDv1 string.
@@ -236,6 +260,10 @@ private:
 };
 
 /// A validated record URI/record-CID pair identifying one record version.
+///
+/// \par Thread safety
+/// The value has no mutation operations. Concurrent const access is safe when
+/// the same object is not moved or destroyed.
 class StrongRef {
 public:
     /// Creates a strong reference for a record URI and AT Protocol CID.
