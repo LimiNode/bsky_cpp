@@ -513,6 +513,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             state->work_done = true;
             state->callback_done = true;
             released_transport = std::move(state->async_transport);
+            if (released_transport && async_transport_leases != 0U) {
+                --async_transport_leases;
+            }
             operations.erase(state.get());
             condition.notify_all();
         }
@@ -578,6 +581,13 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                     "operation admission limit reached",
                     "runtime.submit_async"));
             }
+            if (async_transport_leases >= options.max_in_flight) {
+                return Result<OperationHandle>::failure(Error(
+                    ErrorCategory::Backpressure,
+                    "deferred native async transport limit reached",
+                    "runtime.submit_async"));
+            }
+            ++async_transport_leases;
             state->work_started = true;
             operations.emplace(state.get(), state);
             expired = operation_options.deadline &&
@@ -590,6 +600,9 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                 std::lock_guard<std::mutex> lock(mutex);
                 state->async_admission = OperationState::AsyncAdmission::none;
                 released_transport = std::move(state->async_transport);
+                if (released_transport && async_transport_leases != 0U) {
+                    --async_transport_leases;
+                }
             }
             released_transport.reset();
             timeout(state);
@@ -1104,6 +1117,10 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             // The runtime cannot recover a failed handoff allocation. Keep
             // the completion boundary exception-safe and release this lease
             // on the current thread as the bounded fallback.
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (async_transport_leases != 0U) --async_transport_leases;
+            }
             transport.reset();
         }
     }
@@ -1117,7 +1134,12 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
         // Destruction is deliberately outside the runtime mutex. In managed
         // mode this runs on the ModuleHub thread; external mode runs it on
         // the consumer/finalization path rather than an adapter callback.
+        const auto released_count = releases.size();
         releases.clear();
+        if (released_count != 0U) {
+            std::lock_guard<std::mutex> lock(mutex);
+            async_transport_leases -= released_count;
+        }
     }
 
     RuntimeOptions options;
@@ -1131,6 +1153,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     std::mutex consumer_mutex;
     std::unordered_map<OperationState*, std::shared_ptr<OperationState>> operations;
     std::vector<std::shared_ptr<AsyncTransport>> deferred_async_transports;
+    std::size_t async_transport_leases = 0U;
     std::size_t blocking_operations = 0U;
     bool started = false;
     bool starting = false;

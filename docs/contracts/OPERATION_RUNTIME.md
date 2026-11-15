@@ -72,6 +72,11 @@ completion. Only that completion releases the native-operation obligation. The
 lease handoff is drained by the existing runtime scheduler (or the external
 consumer/finalization path), so the last adapter owner is not intentionally
 destroyed on the adapter's completion callback thread.
+In external mode, deferred adapter leases are bounded by `max_in_flight`;
+when that bound is reached, a new native async admission returns
+`Backpressure` until `process_once()` or finalization drains the deferred
+leases. This bound is separate from the active operation registry: a terminal
+operation may have left the registry while its adapter lease is still held.
 `start()` may be called concurrently for different operations on one adapter;
 the adapter must synchronize its state, reject a pre-cancelled token before a
 network side effect, and never invoke completion while holding an internal lock.

@@ -63,6 +63,9 @@ implemented.
   owner on its completion callback thread. A synchronous admission failure is
   reconciled atomically with any cancellation or inline completion observed
   during the call: failure returns no handle and invokes no user callback.
+  In external mode, deferred adapter leases are bounded by
+  `max_in_flight`; native async admission returns `Backpressure` until the
+  external consumer drains those leases with `process_once()` or finalization.
 - Different runtime submissions may call one adapter instance's `start()`
   concurrently. The adapter owns synchronization of its state, must inspect a
   pre-cancelled token before causing a network side effect, and must not hold
