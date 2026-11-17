@@ -177,15 +177,19 @@ public:
 class DestructionProbeAsyncTransport final : public AsyncTransport {
 public:
     DestructionProbeAsyncTransport(std::shared_ptr<std::atomic<bool>> destroyed,
-                                   std::shared_ptr<std::atomic<bool>> on_callback)
+                                   std::shared_ptr<std::atomic<bool>> on_callback,
+                                   std::shared_ptr<Gate> destruction_gate = {})
         : m_destroyed(std::move(destroyed)),
-          m_on_callback(std::move(on_callback)) {}
+          m_on_callback(std::move(on_callback)),
+          m_destruction_gate(std::move(destruction_gate)) {}
 
     ~DestructionProbeAsyncTransport() override {
         m_destroyed->store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (std::this_thread::get_id() == m_completion_thread) {
             m_on_callback->store(true, std::memory_order_release);
         }
+        if (m_destruction_gate) m_destruction_gate->signal();
     }
 
     Result<void> start(TransportRequest, CancellationToken,
@@ -201,7 +205,10 @@ public:
             std::lock_guard<std::mutex> lock(m_mutex);
             completion = std::move(m_completion);
         }
-        m_completion_thread = std::this_thread::get_id();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_completion_thread = std::this_thread::get_id();
+        }
         auto response = TransportResponse::create(200U);
         BSKY_RUNTIME_CHECK(response);
         completion(std::move(response));
@@ -210,6 +217,7 @@ public:
 private:
     std::shared_ptr<std::atomic<bool>> m_destroyed;
     std::shared_ptr<std::atomic<bool>> m_on_callback;
+    std::shared_ptr<Gate> m_destruction_gate;
     std::mutex m_mutex;
     Completion m_completion;
     std::thread::id m_completion_thread;
@@ -2101,6 +2109,61 @@ void native_async_transport_semantics() {
         BSKY_RUNTIME_CHECK(late);
         (*pending)(std::move(late));
         BSKY_RUNTIME_CHECK(callbacks == 1);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A native completion must wake the managed hub even when no user work or
+    // callback is queued. The deferred lease is released on the hub thread,
+    // and the capacity becomes available without a spurious Backpressure.
+    {
+        auto destroyed = std::make_shared<std::atomic<bool>>(false);
+        auto on_callback = std::make_shared<std::atomic<bool>>(false);
+        auto destruction_gate = std::make_shared<Gate>();
+        auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+            destroyed, on_callback, destruction_gate);
+        Runtime runtime({RuntimeMode::Managed, 1U});
+        BSKY_RUNTIME_CHECK(runtime.start());
+        auto operation = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(operation);
+        transport->complete();
+        transport.reset();
+        destruction_gate->wait();
+        BSKY_RUNTIME_CHECK(destroyed->load(std::memory_order_acquire) &&
+                           !on_callback->load(std::memory_order_acquire));
+
+        auto next_transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken,
+               AsyncTransport::Completion completion) {
+                auto response = TransportResponse::create(204U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::success();
+            });
+        auto next = runtime.submit_async(next_transport, blocking_request());
+        BSKY_RUNTIME_CHECK(next);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Registration allocation failure occurs before either admission counter
+    // is incremented. A later operation can therefore use the full capacity.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(1U, executor);
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken,
+               AsyncTransport::Completion completion) {
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::success();
+            });
+        Access::inject_fault(runtime, Fault::AsyncRegistration);
+        auto rejected = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(!rejected &&
+                           rejected.error().category() == ErrorCategory::Internal &&
+                           Access::registered_operations(runtime) == 0U);
+        auto accepted = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(accepted);
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 

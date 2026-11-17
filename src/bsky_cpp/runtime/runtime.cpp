@@ -101,6 +101,11 @@ private:
 
 struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     explicit RuntimeCore(RuntimeOptions value) : options(std::move(value)) {
+        if (options.max_in_flight != 0U) {
+            // The deferred handoff must not allocate on an adapter completion
+            // thread. Prepare bounded slot storage before admission.
+            deferred_async_transports.resize(options.max_in_flight);
+        }
         module = &hub.emplace_module<RuntimeModule>(*this);
         if (options.max_blocking_in_flight != 0U) {
             blocking_module =
@@ -219,6 +224,16 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
             request_hub_stop = stopping && operations.empty();
         }
         if (request_hub_stop) hub.request_stop();
+    }
+
+    void wake_deferred_async_cleanup() noexcept {
+        try {
+            // TaskManager uses the existing ModuleHub notifier. This wakes
+            // managed execution without adding a scheduler or a worker.
+            (void)module->tasks().post([] {});
+        } catch (...) {
+            // Finalization remains the reserve path if posting itself fails.
+        }
     }
 
     Result<std::size_t> process_once() {
@@ -587,9 +602,28 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
                     "deferred native async transport limit reached",
                     "runtime.submit_async"));
             }
-            ++async_transport_leases;
+            std::pair<std::unordered_map<OperationState*,
+                                         std::shared_ptr<OperationState>>::iterator,
+                      bool> insertion;
+            try {
+                if (consume_fault(RuntimeFaultPoint::AsyncRegistration)) {
+                    throw std::bad_alloc();
+                }
+                insertion = operations.emplace(state.get(), state);
+            } catch (...) {
+                return Result<OperationHandle>::failure(Error(
+                    ErrorCategory::Internal,
+                    "native async operation registration failed",
+                    "runtime.submit_async"));
+            }
+            if (!insertion.second) {
+                return Result<OperationHandle>::failure(Error(
+                    ErrorCategory::Conflict,
+                    "native async operation registration collided",
+                    "runtime.submit_async"));
+            }
             state->work_started = true;
-            operations.emplace(state.get(), state);
+            ++async_transport_leases;
             expired = operation_options.deadline &&
                       *operation_options.deadline <= std::chrono::steady_clock::now();
         }
@@ -1110,35 +1144,51 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
 
     void defer_async_transport(std::shared_ptr<AsyncTransport> transport) noexcept {
         if (!transport) return;
-        try {
+        bool stored = false;
+        {
             std::lock_guard<std::mutex> lock(mutex);
-            deferred_async_transports.emplace_back(transport);
-        } catch (...) {
-            // The runtime cannot recover a failed handoff allocation. Keep
-            // the completion boundary exception-safe and release this lease
-            // on the current thread as the bounded fallback.
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                if (async_transport_leases != 0U) --async_transport_leases;
+            for (auto& slot : deferred_async_transports) {
+                if (!slot) {
+                    slot = std::move(transport);
+                    stored = true;
+                    break;
+                }
             }
-            transport.reset();
         }
+        if (stored) {
+            wake_deferred_async_cleanup();
+            return;
+        }
+
+        // The lease bound and preallocated slots must agree. Keep this
+        // invariant-failure path noexcept and repair accounting if corrupted.
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (async_transport_leases != 0U) --async_transport_leases;
+        }
+        transport.reset();
     }
 
     void release_deferred_async_transports() noexcept {
-        std::vector<std::shared_ptr<AsyncTransport>> releases;
-        {
+        for (;;) {
+            std::shared_ptr<AsyncTransport> release;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                for (auto& slot : deferred_async_transports) {
+                    if (slot) {
+                        release = std::move(slot);
+                        break;
+                    }
+                }
+            }
+            if (!release) return;
+
+            // Destruction is deliberately outside the runtime mutex. In
+            // managed mode this runs on the ModuleHub thread; external mode
+            // runs on the consumer/finalization path.
+            release.reset();
             std::lock_guard<std::mutex> lock(mutex);
-            releases.swap(deferred_async_transports);
-        }
-        // Destruction is deliberately outside the runtime mutex. In managed
-        // mode this runs on the ModuleHub thread; external mode runs it on
-        // the consumer/finalization path rather than an adapter callback.
-        const auto released_count = releases.size();
-        releases.clear();
-        if (released_count != 0U) {
-            std::lock_guard<std::mutex> lock(mutex);
-            async_transport_leases -= released_count;
+            if (async_transport_leases != 0U) --async_transport_leases;
         }
     }
 
