@@ -176,16 +176,26 @@ public:
 
 class DestructionProbeAsyncTransport final : public AsyncTransport {
 public:
+    struct ProbeState {
+        std::mutex mutex;
+        std::thread::id completion_thread;
+    };
+
     DestructionProbeAsyncTransport(std::shared_ptr<std::atomic<bool>> destroyed,
-                                   std::shared_ptr<std::atomic<bool>> on_callback)
+                                   std::shared_ptr<std::atomic<bool>> on_callback,
+                                   std::shared_ptr<Gate> destruction_gate = {})
         : m_destroyed(std::move(destroyed)),
-          m_on_callback(std::move(on_callback)) {}
+          m_on_callback(std::move(on_callback)),
+          m_destruction_gate(std::move(destruction_gate)),
+          m_probe(std::make_shared<ProbeState>()) {}
 
     ~DestructionProbeAsyncTransport() override {
         m_destroyed->store(true, std::memory_order_release);
-        if (std::this_thread::get_id() == m_completion_thread) {
+        std::lock_guard<std::mutex> lock(m_probe->mutex);
+        if (std::this_thread::get_id() == m_probe->completion_thread) {
             m_on_callback->store(true, std::memory_order_release);
         }
+        if (m_destruction_gate) m_destruction_gate->signal();
     }
 
     Result<void> start(TransportRequest, CancellationToken,
@@ -195,13 +205,26 @@ public:
         return Result<void>::success();
     }
 
-    void complete() {
+    Completion take_completion() {
         Completion completion;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             completion = std::move(m_completion);
         }
-        m_completion_thread = std::this_thread::get_id();
+        auto probe = m_probe;
+        return Completion(
+            [probe, completion = std::move(completion)](
+                Result<TransportResponse> response) mutable {
+                {
+                    std::lock_guard<std::mutex> lock(probe->mutex);
+                    probe->completion_thread = std::this_thread::get_id();
+                }
+                completion(std::move(response));
+            });
+    }
+
+    void complete() {
+        auto completion = take_completion();
         auto response = TransportResponse::create(200U);
         BSKY_RUNTIME_CHECK(response);
         completion(std::move(response));
@@ -210,9 +233,10 @@ public:
 private:
     std::shared_ptr<std::atomic<bool>> m_destroyed;
     std::shared_ptr<std::atomic<bool>> m_on_callback;
+    std::shared_ptr<Gate> m_destruction_gate;
+    std::shared_ptr<ProbeState> m_probe;
     std::mutex m_mutex;
     Completion m_completion;
-    std::thread::id m_completion_thread;
 };
 
 Runtime external(std::size_t limit = 2U,
@@ -2104,6 +2128,68 @@ void native_async_transport_semantics() {
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 
+    // A native completion must wake the managed hub even when no user work or
+    // callback is queued. The deferred lease is released on the hub thread,
+    // and the capacity becomes available without a spurious Backpressure.
+    {
+        auto destroyed = std::make_shared<std::atomic<bool>>(false);
+        auto on_callback = std::make_shared<std::atomic<bool>>(false);
+        auto destruction_gate = std::make_shared<Gate>();
+        auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+            destroyed, on_callback, destruction_gate);
+        Runtime runtime({RuntimeMode::Managed, 1U});
+        BSKY_RUNTIME_CHECK(runtime.start());
+        auto operation = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(operation);
+        auto completion = transport->take_completion();
+        transport.reset();
+        std::thread completion_thread(
+            [completion = std::move(completion)]() mutable {
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+            });
+        completion_thread.join();
+        destruction_gate->wait();
+        BSKY_RUNTIME_CHECK(destroyed->load(std::memory_order_acquire) &&
+                           !on_callback->load(std::memory_order_acquire));
+
+        auto next_transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken,
+               AsyncTransport::Completion completion) {
+                auto response = TransportResponse::create(204U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::success();
+            });
+        auto next = runtime.submit_async(next_transport, blocking_request());
+        BSKY_RUNTIME_CHECK(next);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // Registration allocation failure occurs before either admission counter
+    // is incremented. A later operation can therefore use the full capacity.
+    {
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(1U, executor);
+        auto transport = std::make_shared<FakeAsyncTransport>(
+            [](TransportRequest, CancellationToken,
+               AsyncTransport::Completion completion) {
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+                return Result<void>::success();
+            });
+        Access::inject_fault(runtime, Fault::AsyncRegistration);
+        auto rejected = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(!rejected &&
+                           rejected.error().category() == ErrorCategory::Internal &&
+                           Access::registered_operations(runtime) == 0U);
+        auto accepted = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(accepted);
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
     // A cancellation wins before the adapter completion and suppresses a late
     // response without requiring a waiter thread or a second scheduler.
     {
@@ -2371,6 +2457,84 @@ void native_async_transport_semantics() {
         for (const auto& marker : destroyed) {
             BSKY_RUNTIME_CHECK(marker->load(std::memory_order_acquire));
         }
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+    }
+
+    // A rejected wake post leaves ownership for finalization rather than
+    // destroying the adapter on the completion thread.
+    {
+        auto destroyed = std::make_shared<std::atomic<bool>>(false);
+        auto on_callback = std::make_shared<std::atomic<bool>>(false);
+        auto destruction_gate = std::make_shared<Gate>();
+        auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+            destroyed, on_callback, destruction_gate);
+        auto runtime = external(1U);
+        auto operation = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(operation);
+        auto completion = transport->take_completion();
+        transport.reset();
+        Access::close_executor(runtime);
+        std::thread completion_thread(
+            [completion = std::move(completion)]() mutable {
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+            });
+        completion_thread.join();
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        destruction_gate->wait();
+        BSKY_RUNTIME_CHECK(destroyed->load(std::memory_order_acquire) &&
+                           !on_callback->load(std::memory_order_acquire));
+    }
+
+    // A completion burst larger than the upstream per-pass task quota is
+    // coalesced into one wake-up and drained in one external cleanup pass.
+    {
+        constexpr std::size_t burst_size = 128U;
+        auto executor = std::make_shared<ControlledExecutor>();
+        auto runtime = external(burst_size, executor);
+        std::vector<AsyncTransport::Completion> pending;
+        std::vector<std::shared_ptr<std::atomic<bool>>> destroyed;
+        pending.reserve(burst_size);
+        destroyed.reserve(burst_size);
+        for (std::size_t index = 0; index != burst_size; ++index) {
+            auto marker = std::make_shared<std::atomic<bool>>(false);
+            auto on_callback = std::make_shared<std::atomic<bool>>(false);
+            auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+                marker, on_callback);
+            auto operation = runtime.submit_async(
+                transport, blocking_request());
+            BSKY_RUNTIME_CHECK(operation);
+            pending.emplace_back(transport->take_completion());
+            transport.reset();
+            destroyed.emplace_back(std::move(marker));
+        }
+
+        for (auto& completion : pending) {
+            auto response = TransportResponse::create(200U);
+            BSKY_RUNTIME_CHECK(response);
+            completion(std::move(response));
+        }
+        auto blocked = runtime.submit_async(
+            std::make_shared<FakeAsyncTransport>(), blocking_request());
+        BSKY_RUNTIME_CHECK(!blocked &&
+                           blocked.error().category() == ErrorCategory::Backpressure);
+        BSKY_RUNTIME_CHECK(runtime.process_once());
+        for (const auto& marker : destroyed) {
+            BSKY_RUNTIME_CHECK(marker->load(std::memory_order_acquire));
+        }
+
+        auto recovered = runtime.submit_async(
+            std::make_shared<FakeAsyncTransport>(
+                [](TransportRequest, CancellationToken,
+                   AsyncTransport::Completion completion) {
+                    auto response = TransportResponse::create(204U);
+                    BSKY_RUNTIME_CHECK(response);
+                    completion(std::move(response));
+                    return Result<void>::success();
+                }),
+            blocking_request());
+        BSKY_RUNTIME_CHECK(recovered);
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 

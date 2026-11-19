@@ -11,7 +11,8 @@ enum class RuntimeFaultPoint {
     Terminalization,
     WorkError,
     DeliveryRejectionError,
-    SubmitRejectionError
+    SubmitRejectionError,
+    AsyncRegistration
 };
 // Private integration fixture. Close the executor only on an idle external
 // consumer; this exercises actual upstream post-admission queue rejection.
