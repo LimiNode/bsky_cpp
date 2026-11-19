@@ -2460,6 +2460,33 @@ void native_async_transport_semantics() {
         BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
     }
 
+    // A rejected wake post leaves ownership for finalization rather than
+    // destroying the adapter on the completion thread.
+    {
+        auto destroyed = std::make_shared<std::atomic<bool>>(false);
+        auto on_callback = std::make_shared<std::atomic<bool>>(false);
+        auto destruction_gate = std::make_shared<Gate>();
+        auto transport = std::make_shared<DestructionProbeAsyncTransport>(
+            destroyed, on_callback, destruction_gate);
+        auto runtime = external(1U);
+        auto operation = runtime.submit_async(transport, blocking_request());
+        BSKY_RUNTIME_CHECK(operation);
+        auto completion = transport->take_completion();
+        transport.reset();
+        Access::close_executor(runtime);
+        std::thread completion_thread(
+            [completion = std::move(completion)]() mutable {
+                auto response = TransportResponse::create(200U);
+                BSKY_RUNTIME_CHECK(response);
+                completion(std::move(response));
+            });
+        completion_thread.join();
+        BSKY_RUNTIME_CHECK(runtime.shutdown(1s));
+        destruction_gate->wait();
+        BSKY_RUNTIME_CHECK(destroyed->load(std::memory_order_acquire) &&
+                           !on_callback->load(std::memory_order_acquire));
+    }
+
     // A completion burst larger than the upstream per-pass task quota is
     // coalesced into one wake-up and drained in one external cleanup pass.
     {
