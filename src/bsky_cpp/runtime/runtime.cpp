@@ -227,12 +227,24 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     }
 
     void wake_deferred_async_cleanup() noexcept {
+        bool expected = false;
+        if (!deferred_cleanup_posted.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return;
+        }
         try {
             // TaskManager uses the existing ModuleHub notifier. This wakes
             // managed execution without adding a scheduler or a worker.
-            (void)module->tasks().post([] {});
+            const auto task_id = module->tasks().post([this] {
+                deferred_cleanup_posted.store(false, std::memory_order_release);
+            });
+            if (task_id == 0U) {
+                deferred_cleanup_posted.store(false, std::memory_order_release);
+            }
         } catch (...) {
             // Finalization remains the reserve path if posting itself fails.
+            deferred_cleanup_posted.store(false, std::memory_order_release);
         }
     }
 
@@ -1203,6 +1215,7 @@ struct RuntimeCore final : std::enable_shared_from_this<RuntimeCore> {
     std::mutex consumer_mutex;
     std::unordered_map<OperationState*, std::shared_ptr<OperationState>> operations;
     std::vector<std::shared_ptr<AsyncTransport>> deferred_async_transports;
+    std::atomic<bool> deferred_cleanup_posted{false};
     std::size_t async_transport_leases = 0U;
     std::size_t blocking_operations = 0U;
     bool started = false;

@@ -61,10 +61,11 @@ implemented.
   then handed to the existing runtime scheduler or external finalization path
   for destruction, rather than intentionally destroying the last adapter
   owner on its completion callback thread. A native completion wakes the
-  existing event-hub `TaskManager`, so managed cleanup does not depend on an
-  unrelated user task. Deferred lease slots are prepared before admission;
-  the normal completion handoff does not allocate on the adapter thread. A
-  synchronous admission failure is
+  existing event-hub `TaskManager`; wake requests are coalesced while one task
+  is pending, so managed cleanup does not depend on unrelated user work.
+  Deferred lease slots are prepared before admission; the normal lease handoff
+  does not grow storage on the adapter thread. A failed wake post leaves the
+  lease for finalization. A synchronous admission failure is
   reconciled atomically with any cancellation or inline completion observed
   during the call: failure returns no handle and invokes no user callback.
   In external mode, deferred adapter leases are bounded by

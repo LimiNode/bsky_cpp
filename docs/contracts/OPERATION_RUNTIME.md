@@ -72,10 +72,11 @@ completion. Only that completion releases the native-operation obligation. The
 lease handoff is drained by the existing runtime scheduler (or the external
 consumer/finalization path), so the last adapter owner is not intentionally
 destroyed on the adapter's completion callback thread. A native completion
-posts a no-op task through the existing `TaskManager` to wake a sleeping
-managed hub; the external consumer receives the same notification through its
-configured notifier. Deferred lease slots are prepared at runtime construction,
-so the normal completion handoff does not allocate on the adapter thread.
+posts one coalesced no-op task through the existing `TaskManager` to wake a
+sleeping managed hub; the external consumer receives the same notification
+through its configured notifier. Deferred lease slots are prepared at runtime
+construction, so the normal lease handoff does not grow storage on the adapter
+thread. A failed wake post leaves the lease for the normal finalization path.
 In external mode, deferred adapter leases are bounded by `max_in_flight`;
 when that bound is reached, a new native async admission returns
 `Backpressure` until `process_once()` or finalization drains the deferred
